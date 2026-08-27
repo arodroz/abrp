@@ -80,6 +80,10 @@ _Avoid_: Charge limit, target SoC (that is the per-stop departure SoC the planne
 The user preference between few long Charging Stops, the quickest arrival, and many short Charging Stops.
 _Avoid_: Charging strategy, stop mode
 
+**Trip Log**:
+The record of one real drive used to calibrate the Energy Model: an automatically captured GPS trace with timestamps and ambient temperature, plus the dash SoC entered by the driver at start and end.
+_Avoid_: Drive log, telemetry, trip history
+
 **Invalid Plan**:
 A Plan the planner could not make satisfy the SoC constraints; it is still returned, with the failing Leg flagged, instead of an error.
 _Avoid_: Failed route, no route
