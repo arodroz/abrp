@@ -1,0 +1,58 @@
+21:49:27  Acquired tunnel connection to device.
+21:49:27  Enabling developer disk image services.
+21:49:27  Acquired usage assertion.
+Launched application with org.anteras.slice-proto bundle identifier.
+Waiting for the application to terminate…
+2026-08-27 21:49:28.160 SliceProto[74770:4757041] MLNMapView WARNING UIViewController.automaticallyAdjustsScrollViewInsets is deprecated use MLNMapView.automaticallyAdjustContentInset instead.
+PROTO planner_init_ms=516.41
+[planner] candidates=192 ch_queries=4141
+PROTO plan route_ms=40.97 optimiser_ms=412.21 total_ms=455.73 wall_ms=458.02 stops=1 total_time_s=14399.91 dist_km=412.45
+PROTO soc_curve first=[0.00,0.90] [2029.55,0.89] [4000.06,0.89] last=[408012.52,0.15] [410001.02,0.15] [412037.49,0.14]
+PROTO t=1 fps=120.34 mem_mb=691.88
+PROTO t=2 fps=90.98 mem_mb=693.86
+PROTO t=3 fps=111.98 mem_mb=671.22
+PROTO t=4 fps=119.98 mem_mb=638.89
+PROTO t=5 fps=119.97 mem_mb=612.92
+PROTO t=6 fps=119.98 mem_mb=612.85
+PROTO t=7 fps=119.98 mem_mb=612.85
+PROTO t=8 fps=119.98 mem_mb=612.85
+PROTO t=9 fps=119.98 mem_mb=612.85
+PROTO t=10 fps=119.97 mem_mb=612.85
+PROTO t=11 fps=119.98 mem_mb=612.86
+PROTO t=12 fps=119.98 mem_mb=612.88
+PROTO t=13 fps=119.98 mem_mb=612.88
+PROTO t=14 fps=119.97 mem_mb=612.88
+PROTO t=15 fps=119.97 mem_mb=612.88
+PROTO t=16 fps=119.97 mem_mb=612.91
+PROTO t=17 fps=119.97 mem_mb=612.91
+PROTO t=18 fps=119.97 mem_mb=612.91
+PROTO t=19 fps=119.97 mem_mb=612.91
+PROTO t=20 fps=119.97 mem_mb=612.91
+PROTO t=21 fps=119.97 mem_mb=612.91
+PROTO t=22 fps=119.97 mem_mb=612.91
+PROTO t=23 fps=119.97 mem_mb=612.91
+PROTO t=24 fps=119.97 mem_mb=612.88
+PROTO t=25 fps=119.98 mem_mb=612.88
+PROTO t=26 fps=119.98 mem_mb=612.88
+PROTO t=27 fps=119.98 mem_mb=612.88
+PROTO t=28 fps=119.98 mem_mb=612.88
+PROTO t=29 fps=119.98 mem_mb=612.89
+PROTO t=30 fps=119.97 mem_mb=612.92
+PROTO t=31 fps=119.97 mem_mb=612.92
+PROTO t=32 fps=119.97 mem_mb=612.89
+PROTO t=33 fps=119.97 mem_mb=612.89
+PROTO t=34 fps=119.97 mem_mb=612.89
+PROTO t=35 fps=119.97 mem_mb=612.92
+PROTO t=36 fps=119.97 mem_mb=612.92
+PROTO t=37 fps=119.97 mem_mb=612.92
+PROTO t=38 fps=119.97 mem_mb=612.92
+PROTO t=39 fps=119.97 mem_mb=612.92
+PROTO t=40 fps=119.97 mem_mb=612.92
+PROTO t=41 fps=119.98 mem_mb=612.89
+PROTO t=42 fps=119.98 mem_mb=612.89
+PROTO t=43 fps=119.98 mem_mb=612.91
+PROTO t=44 fps=119.98 mem_mb=612.83
+PROTO t=45 fps=119.98 mem_mb=612.83
+PROTO t=46 fps=119.97 mem_mb=612.83
+PROTO SUMMARY fps_avg=119.79 fps_min=111.98 mem_peak_mb=693.86 plan_total_ms=455.73
+App terminated due to signal 15.

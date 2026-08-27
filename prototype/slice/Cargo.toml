@@ -1,0 +1,27 @@
+[package]
+name = "planner"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "planner"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[[bin]]
+name = "build_pack"
+path = "src/bin/build_pack.rs"
+
+[[bin]]
+name = "plan_cli"
+path = "src/bin/plan_cli.rs"
+
+[dependencies]
+uniffi = "=0.31.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bincode = "1"
+osmpbf = "0.3"
+fast_paths = "1"
+flate2 = "1"
+libc = "0.2"
+memmap2 = "0.9"
