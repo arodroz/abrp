@@ -51,3 +51,7 @@ _Avoid_: Offline map, tile bundle, map download
 **Reference Consumption**:
 The single user-facing calibration number of a Vehicle Model: the energy per km the car uses at a steady 110 km/h in mild conditions. Adjusting it scales the Energy Model's predictions; it does not replace the Energy Model.
 _Avoid_: Efficiency, Wh/km setting, consumption factor
+
+**Charger Pack**:
+A downloadable set of Chargers covering one region, built from open national datasets and installed on the phone so the planner can choose Charging Stops without connectivity. Refreshed independently of the Region Pack.
+_Avoid_: Charger database, POI file, station list
