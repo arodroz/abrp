@@ -1,0 +1,134 @@
+# Can a Rust Routing Engine run on-device on iPhone with Google-Maps-class latency?
+
+Research note for issue #3. Date: 2026-08-27. Terms follow `CONTEXT.md` (Routing Engine, Leg, Plan, Energy Model, Charger, Vehicle Model).
+
+## TL;DR
+
+- **The query side is easily fast enough.** A contraction-hierarchy (CH) query on a continent-sized graph is sub-millisecond on a laptop core, so a full Plan (tens of Legs plus Charger-candidate evaluation) is bounded by graph *loading*, not by search. Published Rust numbers: `fast_paths` answers a random query on the full USA DIMACS graph (23.95 M nodes, 57.71 M edges) in 305-630 us single-core on an M1 Max ([fast_paths README](https://github.com/easbar/fast_paths)); the KIT Rust CCH reference implementation answers Europe (DIMACS, 18 M nodes) distance queries in ~300 us and Germany-OSM queries in ~440 us on a 2012-era Xeon ([CCH survey, Table 3](https://arxiv.org/abs/2502.10519)).
+- **The hard parts are (a) memory/storage of the graph, (b) turn restrictions, (c) per-edge speed + elevation for the Energy Model, and (d) the OSM -> graph pipeline.** No single Rust crate solves these end-to-end. `fast_paths` is a pure CH kernel (no OSM import, no turn restrictions, node-based only); `osm4routing` is an OSM -> edge-list converter (no CH, no turn restrictions, no maxspeed parsing); `rust_road_router` is a research framework with HERE-CSV import; `cch` is a RoutingKit-compatible CCH kernel with no OSM import. The only production-grade *offline mobile* stack in the OSM ecosystem is C++ Valhalla via `valhalla-mobile` (Swift Package, MIT), fronted by Ferrostar (Rust core + UniFFI).
+- **Sizing:** Benelux+FR+DE raw OSM is ~11.2 GB `.pbf`; Valhalla's Germany tileset alone is 4.6 GB on disk; whole-Europe Valhalla tiles are 14 GB (gzip mbtiles) / 31 GB (tar). A CH with travel-time weights for Western Europe occupies ~0.4 GiB in RAM (0.6 GiB with path-unpacking data), rising to 1.1-3.1 GiB when turn costs are modelled. iOS gives a foreground app on a 4 GB iPhone a hard jetsam limit of ~2.1 GB. So a **turn-aware CH for Benelux+FR+DE fits on-device**; whole-Europe turn-aware fits only with mmap paging or a CCH/CRP-style design.
+- **Third-party EV APIs** cost roughly $0.75-2.00 per 1 000 requests (HERE ~$0.75/1k after 30k free; Mapbox Directions $2.00/1k after 100k free, with EV routing in *private preview*; Iternio bills per successful Plan, price on request) and add network latency per Plan. A self-hosted Valhalla/OSRM/GraphHopper for Europe needs a 16-50 GB-RAM server.
+
+**Recommendation for the decision:** build the Routing Engine on-device in Rust for the first slice (Benelux+FR+DE) as a **turn-aware CH (or CCH) over a graph precomputed by a server-side pipeline**, shipped as regional downloads. Keep a thin backend for graph builds and Charger data. Do not depend on a third-party EV API for the core Plan. Details, numbers and caveats below.
+
+---
+
+## 1. What "Google-Maps-class latency" means here
+
+Google publishes no routing latencies; the working target used in this note is: **first Plan visible < 1 s after tap, Leg re-route < 300 ms**, i.e. no spinner during drag/re-plan. A Plan needs one point-to-point query per Leg plus a many-to-many evaluation of candidate Chargers (the planner's inner loop). With sub-millisecond queries, thousands of candidate-Charger evaluations per Plan stay under 1 s on one core. The latency budget is therefore dominated by **graph load time** (first launch / region switch) and by the **Energy Model**, not by shortest-path search.
+
+## 2. Rust crates and projects surveyed
+
+| Project | What it is | OSM import | Turn restrictions | Published benchmark | Licence / activity |
+|---|---|---|---|---|---|
+| [`fast_paths`](https://github.com/easbar/fast_paths) (easbar, author of GraphHopper's edge-based CH) | Pure CH kernel: prepare + bidirectional query, serde serialisation incl. a 32-bit form for wasm, `prepare_with_order` to reuse a node ordering when only weights change | None - takes an `InputGraph` of (from, to, weight) | None; node-based graph; duplicate edges collapsed to the min weight | USA DIMACS 23.95 M nodes / 57.71 M edges: prep 10.6 min (distance) / 5.5 min (time), query 630 us / 305 us; CA&NV 1.89 M nodes: 103 / 60 us; NYC 264 k nodes: 55 / 26 us. M1 Max, single core, Rust 1.74.1, avg of 100 k random queries ([README](https://github.com/easbar/fast_paths)) | Apache-2.0 / MIT dual; v1.0.0 May 2024, ~25.6 k downloads ([crates.io](https://crates.io/crates/fast_paths)); last push 2024-05-07 |
+| [`osm4routing`](https://github.com/rust-transit/osm4routing2) | OSM `.pbf` -> `nodes.csv` + `edges.csv`; also a library; merges ways at non-intersections; reject/require tag filters | Yes (this *is* the importer) | Not handled (relations ignored) | None | MIT; v0.8.0 Apr 2025, ~148 k downloads ([crates.io](https://crates.io/crates/osm4routing)); last push 2026-03-20. `Edge` fields: `id, osm_id, source, target, geometry, properties, nodes, tags` ([docs.rs](https://docs.rs/osm4routing/latest/osm4routing/struct.Edge.html)) - speeds must be derived by us from `tags` |
+| [`rust_road_router`](https://github.com/kit-algo/rust_road_router) (KIT algorithms group) | Research framework: Dijkstra, CH, CCH, TD-S, CATCHUp (time-dependent CCH), CH-Potentials; HTTP server crate; Docker pipeline; InertialFlowCutter submodule for nested-dissection orders ([engine README](https://github.com/kit-algo/rust_road_router/blob/master/engine/README.md)) | HERE CSV import documented; OSM not documented | Turn costs handled in the papers' code (expanded graphs), not a documented API | Import 10-20 min, CCH preprocessing < 1 min ([README](https://github.com/kit-algo/rust_road_router)). The group's `cchpp` (Rust) is the CCH survey's reference implementation, see section 4 | BSD-3-Clause; last push 2026-04-22; 43 stars |
+| [`cch`](https://github.com/Rodeapps/cch) | Pure-Rust CCH, bit-identical to RoutingKit; parallel customisation (rayon); zero-copy mmap bundles; distance-matrix + path queries | None - needs a CSR graph | Not supported | Albania (6.29 M nodes) customisation 367 ms single-thread / 81 ms on 18 cores; query benchmark only on a 576-node grid vs RoutingKit | MIT; v0.3.0 Jul 2026, 457 downloads, pre-1.0 ([crates.io](https://crates.io/crates/cch)) |
+| [`osm_ch`](https://github.com/Stunkymonkey/osm_ch) | Student project: `pre` (pbf -> CH via `osmpbfreader`) + `web` server | Yes | Not documented | None | MIT; 22 stars; last push 2026-04-22 |
+| [RoutingKit](https://github.com/RoutingKit/RoutingKit) (C++, reference) | The KIT CH/CCH library; OSM importer with `get_osm_way_speed`, `oneway_classifier`, and **turn restrictions** via `turn_restriction_classifier` producing `forbidden_turn_from_arc/to_arc` ([OpenStreetMap.md](https://github.com/RoutingKit/RoutingKit/blob/master/doc/OpenStreetMap.md)) | Yes | Yes (mandatory + prohibitive) | "milliseconds or even less on data sets of continental size" ([README](https://github.com/RoutingKit/RoutingKit)) | BSD-2-Clause. Not Rust, but it is the format `cch` mirrors and the importer design to copy |
+| [Ferrostar](https://github.com/stadiamaps/ferrostar) (Stadia Maps) | Navigation SDK: Rust core (models, spatial algorithms, navigation state) -> UniFFI -> Swift/Kotlin; platform code does UI/sensors/network ([architecture](https://stadiamaps.github.io/ferrostar/architecture.html)) | n/a - **does not route**; `RouteAdapter`s call Valhalla/OSRM-compatible HTTP APIs, `CustomRouteProvider` allows local route generation ([route providers](https://stadiamaps.github.io/ferrostar/route-providers.html)) | delegated | none | BSD-style (Stadia Maps 2023, redistribution conditions) ([LICENSE.txt](https://github.com/stadiamaps/ferrostar/blob/main/LICENSE.txt)); 412 stars, pushed 2026-08-25 |
+| [`valhalla-mobile`](https://github.com/Rallista/valhalla-mobile) (C++ core, Swift Package) | Valhalla packaged for iOS (SwiftPM) and Android (Maven); `route`, `trace_route`, `trace_attributes`, `height`, `sources_to_targets`; runs against downloaded tiles; needs an elevation-tile directory for `height` ([README](https://github.com/Rallista/valhalla-mobile)) | server-side `valhalla_build_tiles` | Yes (simple + complex via-way, see section 6) | none published | MIT; v3.6.3; pushed 2026-08-26; maintainers call it "production ready" and discuss moving it under the Valhalla org ([discussion #4509](https://github.com/valhalla/valhalla/discussions/4509)) |
+
+Ferrostar's approach, as stated by the Valhalla maintainers: generate tiles server-side, download pre-parsed tilesets, run Valhalla on-device behind Ferrostar's provider interface "similarly to a remote server despite running locally"; generating tiles on-device is "extremely resource-intensive" because it needs admin DBs, timezone data and elevation ([discussion #4746](https://github.com/valhalla/valhalla/discussions/4746)).
+
+**Gap analysis.** No Rust crate offers *OSM -> turn-aware CH -> on-device query* end-to-end. The pieces exist: `osm4routing` (or `osmpbfreader` directly) for parsing, RoutingKit's importer as the specification for speeds / one-way / turn restrictions, `fast_paths` or `cch` as the search kernel. What is missing is the edge-expanded graph (turn restrictions), the speed model, the elevation join and an mmap-able serialisation.
+
+## 3. OSM extract -> graph pipeline
+
+1. **Extract.** Geofabrik `.osm.pbf` (data of 2026-08-26): Luxembourg 45.2 MB, Belgium 660 MB, Netherlands 1.3 GB, Germany 4.5 GB, France 4.7 GB (about 11.2 GB for the first slice); Europe 32.5 GB ([Geofabrik Europe](https://download.geofabrik.de/europe.html)).
+2. **Parse** `highway=*` ways, apply access / one-way rules, split at intersections (osm4routing does this and merges through-nodes).
+3. **Speed per edge** (needed both for travel-time weights and for the Energy Model's speed profile):
+   - OSM `maxspeed` exists on only 22.0 M of 266.5 M `highway` ways worldwide (about 8 %) ([taginfo maxspeed](https://taginfo.openstreetmap.org/api/4/key/stats?key=maxspeed), [taginfo highway](https://taginfo.openstreetmap.org/api/4/key/stats?key=highway), data 2026-08-27). Every engine therefore falls back to defaults by road class and country.
+   - OSRM `car.lua` defaults: motorway 90, trunk 85, primary 65, secondary 55, tertiary 40, residential 25, living_street 10, service 15 km/h, plus a per-country statutory `maxspeed` table with fallback urban 50 / rural 90 / trunk 110 / motorway 130 ([car.lua](https://github.com/Project-OSRM/osrm-backend/blob/master/profiles/car.lua)).
+   - Valhalla: `maxspeed` if present (clamped to 140 km/h), else `lua/graph.lua` class defaults, overridable per country/density via `default_speeds.json`, then urban-density reductions; at query time the hierarchy is live traffic -> predicted weekly 5-min profiles -> constrained (7am-7pm) -> free-flow -> base ([speeds](https://valhalla.github.io/valhalla/concepts/speeds/)). Historical speeds are imported from CSV with 2016 values per edge ([historical traffic](https://valhalla.github.io/valhalla/mjolnir/historical_traffic/)).
+   - Consequence for the Energy Model: OSM alone yields a *static* speed per edge (limit or class default); realistic free-flow / traffic speeds require a paid feed (HERE / TomTom / Mapbox) or our own telemetry. Iternio's API advertises "real-time traffic integration" ([Iternio APIs](https://abrp.featurebase.app/en/help/articles/1764088-iternio-apis)).
+4. **Elevation per edge** - OSM has no elevation; join a DEM in the build pipeline:
+   - Copernicus GLO-30: global 30 m DSM, 1 x 1 degree COG tiles (3600 x 3600 px), free public licence; absolute vertical accuracy < 4 m LE90 ([AWS readme](https://copernicus-dem-30m.s3.amazonaws.com/readme.html), [CDSE COP-DEM](https://dataspace.copernicus.eu/explore-data/data-collections/copernicus-contributing-missions/collections-description/COP-DEM)). The 10 m EEA-10 Europe product is access-restricted ([same page](https://dataspace.copernicus.eu/explore-data/data-collections/copernicus-contributing-missions/collections-description/COP-DEM)).
+   - AWS Terrain Tiles (Mapzen / tilezen `joerd`): free, no auth, `elevation-tiles-prod-eu` bucket in eu-central-1; Europe sources are SRTM 30 m + EU-DEM 30 m; skadi `.hgt`, terrarium and normal formats ([registry](https://registry.opendata.aws/terrain-tiles/), [data sources](https://github.com/tilezen/joerd/blob/master/docs/data-sources.md)). No further updates planned since v1.1 (2017Q4).
+   - Valhalla's Skadi samples elevation every 60 m along an edge and stores one "weighted grade" per edge ([elevation costing](https://valhalla.github.io/valhalla/sif/elevation_costing/)); a raw 1-degree `.hgt` tile is 25.9 MB and compression yields 5-10x smaller storage ([issue #879](https://github.com/valhalla/valhalla/issues/879)).
+   - The Energy Model needs more than one grade per edge: store a compact elevation profile per edge (e.g. sampled every 100 m) or one i16 per node and recompute per Leg. Per-node elevation for a 30 M-node graph is about 60 MB.
+5. **Turn restrictions** - see section 6.
+6. **Contract** (CH) or **order + build + customise** (CCH), serialise, ship as a per-region download.
+
+## 4. Graph size and memory
+
+Reference points (primary sources):
+
+| Dataset | Nodes / edges | Space / time | Source |
+|---|---|---|---|
+| Western Europe, DIMACS (PTV) | 18.0 M vertices / 42.5 M arcs | CH space 0.4 GiB, prep 5 min, 110 us query, 280 vertex scans; Dijkstra 2.2 s | [Bast et al. 2016, Table 1](https://arxiv.org/abs/1504.05140) |
+| Same, **with turn costs** (100 s U-turn) | - | CH arc-based expanded graph: 3.14 GiB, 0.20 ms dist / 0.30 ms path; CH compact: 1.09 GiB, 2.27 ms; CRP: 3.11 GiB DS + 0.07 GiB per metric, 1.65 ms; CH without turns incl. unpacking data 0.60 GiB | [Bast et al. 2016, Table 2](https://arxiv.org/abs/1504.05140) |
+| Europe (DIMACS) and Germany (OSM), CCH in Rust | Europe: order 341 s + contraction 1.6 s; customisation 10.8 s single-thread / 1.25 s on 16 threads; query 300 us (G+) / 138 us after perfect customisation, path unpack 96 us. Germany-OSM: query 442 / 163 us, path 235 us | [Blaesius et al., CCH survey, Tables 1-3](https://arxiv.org/abs/2502.10519) (Xeon E5-2670, 2012) |
+| USA DIMACS in `fast_paths` | 23.95 M / 57.71 M | 305-630 us query, 5.5-10.6 min prep, M1 Max | [fast_paths](https://github.com/easbar/fast_paths) |
+| GraphHopper Europe (car) | 147 M edges (base graph, 2022) | import 33 GB RAM (no CH); CH prep 27.5 GB / ~25 h car | [GraphHopper blog 2022](https://www.graphhopper.com/blog/2022/06/27/host-your-own-worldwide-route-calculator-with-graphhopper/) |
+| Valhalla Germany tiles | 1 205 tiles | 4.6 GB tar; default tile cache 1 GB | [discussion #4816](https://github.com/valhalla/valhalla/discussions/4816) |
+| Valhalla Europe tiles | - | 31.4 GB tar / 14 GB gzip mbtiles | [discussion #4509](https://github.com/valhalla/valhalla/discussions/4509) |
+| Valhalla server RAM | - | Europe ~16 GB, planet >= 32 GB; ~200 req/s per core | [discussion #5919](https://github.com/valhalla/valhalla/discussions/5919) |
+| OSRM planet (car, v5.26) | - | 123 GiB RAM to serve; 415 GiB to extract | [OSRM wiki](https://github.com/Project-OSRM/osrm-backend/wiki/Disk-and-Memory-Requirements) |
+| Mapbox Nav SDK offline region | 15 km radius | Berlin 42 MB nav + 136 MB map; London 90 MB nav | [Mapbox offline](https://docs.mapbox.com/ios/navigation/guides/advanced/offline/) |
+
+Note the gap between DIMACS Europe (18 M nodes, PTV data) and OSM Europe (GraphHopper: 147 M edges after its own compaction). The CCH survey describes its Germany-OSM instance as the same order of magnitude as DIMACS Europe, so expect an OSM-derived **car graph for Benelux+FR+DE of roughly 15-25 M nodes after removing degree-2 chain nodes**, i.e. comparable to the USA DIMACS graph that `fast_paths` handles at 305 us.
+
+**RAM estimate (first slice, turn-aware).** Scaling Bast's "compact" turn-aware CH (1.09 GiB for 18 M nodes) to ~20 M nodes gives ~1.2 GiB; the arc-based variant would be ~3.5 GiB. A CH with **no** turn model is ~0.5 GiB. Add geometry for Leg polylines (about 8 bytes per shape point) and elevation.
+
+**iOS constraint.** iOS enforces a per-process jetsam limit; a crash log on an iPhone 12 (4 GB) reports `ActiveHard 2098 MB` ([Apple forums thread](https://developer.apple.com/forums/thread/688973)). `os_proc_available_memory` reports the remaining budget at runtime ([Apple docs](https://developer.apple.com/documentation/os/os_proc_available_memory)). Design rule: **keep the resident graph under ~1 GB** - mmap the CH arrays (Valhalla and `cch` both do this) so the OS pages in only what a query touches; a CH query scans a few hundred vertices ([Bast Table 1](https://arxiv.org/abs/1504.05140)).
+
+**Storage.** A turn-aware CH for the first slice at ~1.2 GiB plus geometry is a 1-2 GB download; whole Europe would be 5-8 GB (compare Valhalla Europe 14 GB gzip). Ship per-country / per-region packs.
+
+## 5. Expected query latency on A15/A16
+
+No routing benchmark on A-series silicon exists in primary sources. Scaling argument: `fast_paths` reports 305-630 us on an M1 Max performance core; the A16 scored 1 887 single-core in Geekbench 5, about 5-7 % above the A15 ([Notebookcheck](https://www.notebookcheck.net/Apple-A16-Bionic-flexes-its-multi-core-muscles-in-newest-Geekbench-run.648888.0.html), secondary), and cpu-monkey puts A16 single-core at parity with the M1 ([cpu-monkey](https://www.cpu-monkey.com/en/compare_cpu-apple_a16_bionic-vs-apple_m1), secondary). With a 3x pessimism factor for mobile memory bandwidth and mmap page faults this gives **about 1-2 ms per point-to-point query and about 0.5 ms per distance-only query**, so a Plan with 10 Legs and 5 000 Charger-candidate distance evaluations is about 3 s worst-case cold, well under 1 s warm; a many-to-many (Lazy RPHAST / bucket) formulation brings Charger evaluation to ~0.5 us per target after the first ([CCH survey section 5.2.1](https://arxiv.org/abs/2502.10519)). This must be verified by a spike (see section 10).
+
+Cold start: deserialising a ~1 GB CH from flash is the visible cost; mmap (zero-copy) makes it lazy. `cch` ships "zero-copy mmap bundles" ([cch](https://github.com/Rodeapps/cch)); `fast_paths` uses serde, so a custom mmap layout would be needed.
+
+## 6. Turn restrictions
+
+- OSM models them as `type=restriction` relations (2.29 M worldwide on 2026-08-27, [taginfo](https://taginfo.openstreetmap.org/api/4/tag/stats?key=type&value=restriction)), with `no_*` / `only_*` variants and a `via` that is a node (simple) or one or more ways (complex); "some routing software only supports node-based via members" ([OSM wiki](https://wiki.openstreetmap.org/wiki/Relation:restriction)).
+- Valhalla stores simple and complex (via-way chain) restrictions and indexes them from both ends ([PR #2766](https://github.com/valhalla/valhalla/pull/2766)); OSRM applies `motorcar` / `motor_vehicle` / `vehicle` restrictions plus a 7.5 s turn penalty and a 20 s U-turn penalty ([car.lua](https://github.com/Project-OSRM/osrm-backend/blob/master/profiles/car.lua)); GraphHopper requires edge-based traversal and a separate CH preparation per profile ([turn-restrictions.md](https://github.com/graphhopper/graphhopper/blob/master/docs/core/turn-restrictions.md)).
+- Cost in CH: the turn-expanded ("arc-based") graph makes queries ~2x slower and space ~5x larger than node-based; the "compact" representation halves the space at ~10x slower queries ([Bast Table 2](https://arxiv.org/abs/1504.05140)); "CH has fast queries even with fully realistic turn costs" if space is available. For CCH "the only competitive solution is to model turn costs into the graph" ([CCH survey section 4.3](https://arxiv.org/abs/2502.10519)).
+- `fast_paths` has no turn model; its author implemented edge-based CH with turn costs in GraphHopper (Java) ([PR #1247](https://github.com/graphhopper/graphhopper/pull/1247)), so the technique is proven and the Rust port would be ours.
+- Practical note for EV planning: turn restrictions affect Leg geometry and seconds of time, not energy; a first slice could use node-based CH (ignoring restrictions) for Plan search and a turn-aware search only for the final Leg geometry. A wrong turn during navigation is a visible defect, so restrictions are required before navigation ships.
+
+## 7. Alternative: self-hosted engines
+
+| Engine | Language / licence | Turn restr. | Elevation | Speed data | Europe serving RAM | Mobile |
+|---|---|---|---|---|---|---|
+| [Valhalla](https://github.com/valhalla/valhalla) | C++, MIT ([COPYING](https://github.com/valhalla/valhalla/blob/master/COPYING)) | simple + complex | weighted grade per edge, `height` API | 5-tier hierarchy incl. historical | ~16 GB ([#5919](https://github.com/valhalla/valhalla/discussions/5919)) | yes via `valhalla-mobile` (SwiftPM); tiles 4.6 GB Germany / 14 GB Europe |
+| [OSRM](https://github.com/Project-OSRM/osrm-backend) | C++, BSD-2 | yes | no | `car.lua` defaults + maxspeed | ~50 GB Europe, 10-15 GB Germany ([ayedo](https://ayedo.de/en/posts/osrm-die-referenz-architektur-fur-blitzschnelles-routing-logistik-ohne-api-kosten/), secondary); planet 123 GiB ([OSRM wiki](https://github.com/Project-OSRM/osrm-backend/wiki/Disk-and-Memory-Requirements)); Europe MLD build on a 31 GB laptop: extract 5.5 h, partition 1.3 h ([rcarto](https://rcarto.github.io/posts/build_osrm_server/)) | no |
+| [GraphHopper](https://github.com/graphhopper/graphhopper) | Java, Apache-2 | edge-based CH | SRTM / CGIAR | class defaults + maxspeed | 25 GB import / 18 GB serve for Europe CH ([blog](https://www.graphhopper.com/blog/2022/06/27/host-your-own-worldwide-route-calculator-with-graphhopper/), [deploy.md](https://github.com/graphhopper/graphhopper/blob/master/docs/core/deploy.md)) | no (JVM) |
+
+None of the three exposes an EV planner; all three are Leg-level routers. A self-hosted backend still needs our own Plan optimiser and Energy Model, plus a 32 GB-RAM VPS and a rebuild pipeline; latency = network RTT + a few ms.
+
+## 8. Alternative: third-party EV-capable APIs
+
+| API | EV features | Pricing (list, 2026) | Latency / limits | Sources |
+|---|---|---|---|---|
+| **HERE Routing API v8** | `freeFlowSpeedTable` consumption curve, `ascent` / `descent` Wh per m, `auxiliaryConsumption`, `chargingCurve`, `maxChargeAfterChargingStation`, automatic Charger insertion | 30 000 free transactions/month then about $0.75-0.83 per 1 000 (reseller list price; HERE's own pricing page is gated; +6 % from 2026-04-01) | server-side, no on-device | [HERE EV blog](https://www.here.com/learn/blog/introducing-electric-vehicle-routing-to-the-here-developer-portfolio), [Placematic](https://placematic.com/here-technologies-api-pricing/) (secondary) |
+| **Mapbox Directions API** (`engine=electric`) | `ev_max_charge`, `energy_consumption_curve`, `ev_charging_curve`, `ev_initial_charge`, `ev_min_charge_at_destination`, `ev_ascent` / `ev_descent`, `ev_connector_types`; max 12 waypoints | Directions: 100 k free/month, then $2.00/1k down to $1.20/1k; **EV routing is a Private Preview, pricing via EV Sales** | server-side; Nav SDK has offline regions (42-90 MB nav data per city) but offline EV routing is not documented | [Directions API](https://docs.mapbox.com/api/navigation/directions/), [pricing](https://www.mapbox.com/pricing), [offline](https://docs.mapbox.com/ios/navigation/guides/advanced/offline/) |
+| **Iternio (ABRP) Planning API** | full ABRP Plan: Vehicle Models, Chargers, SoC curve, "real-time traffic integration, weather-aware planning" | "a small setup cost for new customers, and thereafter, we charge per successful plan delivered by the API" (`/plan` endpoint); all other calls free; price on request via contact@iternio.com | server-side; no published SLA | [Iternio APIs](https://abrp.featurebase.app/en/help/articles/1764088-iternio-apis), [ABRP API page](https://web.abetterrouteplanner.com/resources/api), [v2 swagger](https://api.iternio.com/swagger-ui/#/) |
+
+Cost model for an interactive planner that re-plans on every drag / setting change: at 20 Plans per session and 10 k sessions/month, 200 k requests/month is about $150-400/month at HERE / Mapbox list prices and unknown on Iternio; on-device is $0 marginal. Building an ABRP replica on Iternio's API is also a product-dependency risk (Iternio is owned by Rivian, [EVwire](https://x.com/TheEVuniverse/status/1676570839095947265), secondary).
+
+## 9. Decision matrix
+
+| Criterion | On-device Rust CH / CCH | Self-hosted Valhalla + own Plan optimiser | Third-party EV API |
+|---|---|---|---|
+| Leg query latency | ~0.3-2 ms, offline | RTT 50-200 ms + ms | RTT + server-side optimiser |
+| Plan latency (many Legs + Charger candidates) | < 1 s warm, on-device, parallelisable across cores | network-bound; one round-trip if the server optimises | one round-trip |
+| Offline (tunnels, rural Ardennes / Massif Central) | yes | no | no |
+| Turn restrictions | must implement (edge-expanded graph) | built-in | built-in |
+| Elevation + speed per edge for the Energy Model | must implement in the build pipeline (GLO-30 / EU-DEM + class defaults) | Valhalla has grade, `height`, speed hierarchy | HERE / Mapbox expose ascent / descent parameters; Iternio hides everything |
+| Data on phone | 1-2 GB first slice; 5-8 GB Europe | 0 | 0 |
+| Server cost | build pipeline only (batch) | 32 GB-RAM VPS + ops | $0.75-2 per 1k requests, or per Plan (Iternio) |
+| Engineering effort | highest (importer, turn model, serialisation, Rust <-> Swift via UniFFI) | medium (Valhalla + optimiser) | lowest, but Plan quality / roadmap not ours |
+| Meets "Google-Maps-class responsiveness" | yes | only with good connectivity | no (server-side Plan) |
+
+## 10. Open questions / spikes to run
+
+1. Build the Luxembourg+Belgium graph with `osm4routing` -> `fast_paths`, load it in an iOS app via UniFFI, measure cold load, RSS and query latency on an A15 / A16 device (no primary source exists for A-series numbers).
+2. CH vs CCH: CCH's ~1 s parallel customisation (16 Xeon threads; expect 5-10 s on phone cores) would allow per-Vehicle-Model or per-weather weights without re-shipping the graph ([CCH survey Table 2](https://arxiv.org/abs/2502.10519)); CH with `prepare_with_order` is the simpler first step.
+3. Does the Plan optimiser need energy-as-weight routing (weights per Vehicle Model, CCH wins) or time-as-weight routing with energy evaluated on the resulting Leg (plain CH suffices)? ABRP visibly does the latter at Leg granularity.
+4. Choose the DEM (GLO-30 public vs AWS Terrain Tiles EU-DEM) and the per-edge elevation encoding.
+5. Turn-restriction implementation: port RoutingKit's importer semantics or GraphHopper's edge-based CH; validate against Valhalla on a sample of Luxembourg intersections.
+6. Speed source: static defaults for v1; evaluate HERE / TomTom speed profiles later if Energy Model error demands it.
