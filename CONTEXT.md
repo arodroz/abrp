@@ -41,8 +41,8 @@ The component that computes a Leg's road geometry, distance and speed profile fr
 _Avoid_: Router, navigation, directions
 
 **Region Pack**:
-A downloadable road graph covering one region (initially one country), installed on the phone so the Routing Engine can compute Legs without connectivity. Several packs may be loaded together for cross-border Plans.
-_Avoid_: Map download (that is map tiles), region, extract
+A downloadable road graph covering one curated region, installed on the phone so the Routing Engine can compute Legs without connectivity. One Region Pack covers the whole trip region: cross-border Plans use a pack whose region spans the borders (packs are pre-merged in the pipeline, never stitched on the phone).
+_Avoid_: Map download (that is map tiles), region, extract, country pack
 
 **Map Pack**:
 A downloadable set of map tiles covering one region, installed on the phone so the map can be drawn without connectivity. Distinct from a Region Pack, which holds the road graph the Routing Engine uses.
