@@ -7,9 +7,9 @@ attribution list; the in-app "Data sources" screen renders the same entries (ADR
 |---|---|---|---|
 | Charger locations & live status, Luxembourg | Chargy / Creos Luxembourg S.A., via data.public.lu | CC0 1.0 | 2026-08-27 (issue #21) |
 | Charger locations & live status, Netherlands | NDW (Nationaal Dataportaal Wegverkeer), DOT-NL open data | CC0 (ndw.nu/copyright) | 2026-08-27 (issue #21) |
-| Charger locations, Belgium | Road B.V. via transportdata.be | not stated on portal — pending | — |
+| Charger locations, Belgium | Road B.V. via transportdata.be | not stated on portal (confirmed: licence fields empty + CKAN API `license_id: null`); published as AFIR Art. 20 NAP data | 2026-08-27 (issue #21) |
 | Charger locations & live status, France | transport.data.gouv.fr — IRVE consolidated files | Licence Ouverte / Open Licence 2.0 (Etalab) | pending |
-| Charger locations, Germany | Bundesnetzagentur Ladesäulenregister | CC BY 4.0 — "Bundesnetzagentur.de" | pending |
+| Charger locations, Germany | "Bundesnetzagentur Liste der Ladesäulen aus Webserviceschnittstelle" / NOW GmbH (Nationale Leitstelle Ladeinfrastruktur), via Mobilithek | CC BY 4.0, prescribed attribution: „…Webserviceschnittstelle" / NOW GmbH (Nationale Leitstelle Ladeinfrastruktur) (year of last retrieval) | 2026-08-27 (issue #21) |
 | Charger locations, Germany (Baden-Württemberg) | MobiData BW OCPDB | Datenlizenz Deutschland – Namensnennung 2.0 | pending |
 | Charger gap filler, all countries | OpenChargeMap contributors | CC BY 4.0 (user-contributed data) | pending |
 | Weather | Open-Meteo.com | CC BY 4.0 | pending |
