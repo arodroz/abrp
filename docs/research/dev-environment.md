@@ -12,7 +12,7 @@ Filled in by running `bash scripts/bootstrap-mac.sh` on the build Mac and pastin
 | rustc / cargo | 1.98.0 / 1.98.0 |
 | Rust targets | `aarch64-apple-ios`, `aarch64-apple-ios-sim` (+ host, `x86_64-apple-ios`) |
 | UniFFI | 0.32.x (ADR 0004) — no standalone CLI; runs as a bin target in the Rust crate (script's documented fallback). `cargo-swift` 0.11.1 installed. |
-| MapLibre Native | `maplibre-gl-native-distribution` ios-v6.29 — _fps on blank app pending_ |
+| MapLibre Native | `maplibre-gl-native-distribution` ios-v6.29 — **120.0 fps sustained** on blank app (40 s continuous `fly(to:)` camera animation over demo style, measured via 120 Hz `CADisplayLink` callback rate on-device; warmup seconds excluded). Requires `CADisableMinimumFrameDurationOnPhone=YES`. |
 | osmium / pmtiles / aws | osmium 1.19.1 / pmtiles 1.31.2 / aws-cli 2.36.32 |
 
 ## Test device
