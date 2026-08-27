@@ -158,3 +158,23 @@ fetches (EUR-Lex, data.public.lu, chargemap.com) this is flagged and the fallbac
 - Open mobilithek.info in a browser, count AFIR charging offers and note per-offer licences.
 - Confirm NDW DOT-NL licence wording and BE dataset licences (both "not specified" on portals).
 - Request Chargy `my.chargy.lu` API key or confirm data.public.lu KML refresh cadence.
+
+---
+
+## 4. Licence & access verification (issue #21, 27 Aug 2026)
+
+Live probes from the pipeline machine (`curl -I` / `GET`, no credentials unless noted).
+
+| Feed | URL | Access | Licence (verified) | Observed |
+|---|---|---|---|---|
+| **NL — NDW DOT-NL bulk** | `https://opendata.ndw.nu/charging_point_locations_ocpi.json.gz` (18.3 MB), `…/charging_point_locations.geojson.gz` (4.9 MB), `…/charging_point_tariffs_ocpi.json.gz` | **Keyless**, HTTP 200, `Accept-Ranges: bytes` | Portal lists no per-file licence. `https://www.ndw.nu/copyright`: "Creative Commons Zero (CC0)" applies to NDW content unless stated otherwise (exception: photos/videos/infographics). **Treat as CC0; attribute NDW anyway.** | `Last-Modified` within the same minute as the request → regenerated ~every minute |
+| **LU — Chargy KML** | `https://my.chargy.lu/b2bev-external-services/resources/kml?API-KEY=486ac6e4-…` (key published on data.public.lu) | **Works with the published key**, HTTP 200, 693 KB | data.public.lu dataset *Bornes de chargement publiques pour voitures électriques* (org Chargy): **CC-Zero**, frequency "continuous" | 527 `<Placemark>` (482 `#AVAILABLE`, 45 `#UNAVAILABLE`) → the KML **carries live status**; no separate key request to Creos needed |
+| **LU — Eco-Movement multi-operator DATEX II** | `https://api.eco-movement.com/api/nap/datexii/locations?token=S76E…` (token published on data.public.lu) | Works, HTTP 200, 881 KB | data.public.lu: licence **not specified**, frequency quarterly, resource updated 18 Feb 2026 | static only; use as LU gap filler after Chargy |
+| **BE — Road public charging network** | `https://roaming.road.io/files/9ef09c78-2666-418a-aa45-4f2261e2e305/locations.json?force=true` | **Keyless** (GET; HEAD returns 405), 5.2 MB OCPI Locations JSON | transportdata.be page: licence field empty, "less frequent than yearly" | 3 387 BE locations with EVSE status fields |
+| **BE — Eco-Movement static/dynamic DATEX II** | `https://nap-be.eco-movement.com/datex2/v1/locations` | **HTTP 401** — key required, contrary to the "free per portal" note in §2.9 | transportdata.be page: licence field empty; daily | contact support@eco-movement.com for NAP credentials |
+| **BE — EnergyVision AFIR DATEX II** | transportdata.be dataset page → 404 at the slug tried | unverified | unverified | — |
+| **DE — Mobilithek** | `https://mobilithek.info` | JS single-page app; not fetchable headlessly | unverified | needs a browser session (see checklist on the ticket) |
+
+Consequences for ADR 0005: NL and LU live status are confirmed keyless (LU via the published key, refresh continuous);
+BE live status through Eco-Movement needs credentials → BE live stays **off** for v1, BE static comes from Road (keyless) + OCM.
+transportdata.be's CKAN API answered 503 on every attempt, so the Belgian per-dataset licence text is still to be read by hand.
