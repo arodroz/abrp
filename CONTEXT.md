@@ -39,3 +39,7 @@ _Avoid_: Charge speed, charging profile
 **Routing Engine**:
 The component that computes a Leg's road geometry, distance and speed profile from the road graph.
 _Avoid_: Router, navigation, directions
+
+**Region Pack**:
+A downloadable road graph covering one region (initially one country), installed on the phone so the Routing Engine can compute Legs without connectivity. Several packs may be loaded together for cross-border Plans.
+_Avoid_: Map download (that is map tiles), region, extract
