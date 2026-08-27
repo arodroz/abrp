@@ -45,7 +45,7 @@ A downloadable road graph covering one curated region, installed on the phone so
 _Avoid_: Map download (that is map tiles), region, extract, country pack
 
 **Map Pack**:
-A downloadable set of map tiles covering one region, installed on the phone so the map can be drawn without connectivity. Distinct from a Region Pack, which holds the road graph the Routing Engine uses.
+A downloadable set of map tiles covering one curated region, installed on the phone so the map can be drawn without connectivity. Its catalog mirrors the Region Pack's: one Map Pack covers the whole trip region, pre-merged in the pipeline, never stitched on the phone. Distinct from a Region Pack, which holds the road graph the Routing Engine uses.
 _Avoid_: Offline map, tile bundle, map download
 
 **Reference Consumption**:
