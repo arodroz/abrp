@@ -4,7 +4,7 @@
 
 ### Issue tracker
 
-Issues live in GitHub Issues for `ilres-antonio/abrp` (via the `gh` CLI). See `docs/agents/issue-tracker.md`.
+Issues live in GitHub Issues for `arodroz/abrp` (via the `gh` CLI). See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 

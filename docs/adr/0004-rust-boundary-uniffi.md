@@ -2,7 +2,7 @@
 
 Date: 2026-08-27
 Status: Accepted
-Wayfinder ticket: https://github.com/ilres-antonio/abrp/issues/13
+Wayfinder ticket: https://github.com/arodroz/abrp/issues/13
 
 ## Context
 

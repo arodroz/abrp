@@ -8,7 +8,7 @@ Written 27 Aug 2026 when development moved from the Windows box to a Mac. Read t
 A native iOS replication of ABRP's core EV planner for one car (Hyundai Ioniq 5, 2022), Benelux/FR/DE
 first, personal learning project. Architecture is **decided** (six ADRs in `docs/adr/`); the route is
 planned as a *wayfinder map* on GitHub issue
-[#1](https://github.com/ilres-antonio/abrp/issues/1). Nothing has been built yet — the next step is a
+[#1](https://github.com/arodroz/abrp/issues/1). Nothing has been built yet — the next step is a
 measured vertical-slice prototype, which is exactly what needed a Mac.
 
 ## 2. Get the machine ready (once)
@@ -18,7 +18,7 @@ measured vertical-slice prototype, which is exactly what needed a Mac.
 xcode-select --install            # or Xcode 16+ from the App Store, then accept its licence
 brew install gh git python@3.13
 gh auth login                     # account ilres-antonio; needed for the issue tracker
-git clone https://github.com/ilres-antonio/abrp.git && cd abrp
+git clone https://github.com/arodroz/abrp.git && cd abrp
 
 # Claude Code + the skills this project relies on
 npm install -g @anthropic-ai/claude-code
