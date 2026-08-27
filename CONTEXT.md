@@ -55,3 +55,31 @@ _Avoid_: Efficiency, Wh/km setting, consumption factor
 **Charger Pack**:
 A downloadable set of Chargers covering one region, built from open national datasets and installed on the phone so the planner can choose Charging Stops without connectivity. Refreshed independently of the Region Pack.
 _Avoid_: Charger database, POI file, station list
+
+**SoC Curve**:
+The predicted SoC along a Plan as a function of distance, sampled finely enough to chart, together with elevation and energy per km at each sample. The SoC/elevation chart is its rendering.
+_Avoid_: Battery graph, consumption chart, path points
+
+**Departure SoC**:
+The SoC at the origin when the Plan starts.
+_Avoid_: Initial SoC, start charge
+
+**Destination Arrival SoC**:
+The minimum SoC the Plan must have left when reaching the destination.
+_Avoid_: Arrival buffer, reserve
+
+**Charger Arrival SoC**:
+The minimum SoC allowed on arriving at any Charging Stop or waypoint.
+_Avoid_: Safety margin, min SoC
+
+**Charger Max SoC**:
+The highest SoC the planner will charge to at a Charging Stop before leaving.
+_Avoid_: Charge limit, target SoC (that is the per-stop departure SoC the planner picks)
+
+**Stops Bias**:
+The user preference between few long Charging Stops, the quickest arrival, and many short Charging Stops.
+_Avoid_: Charging strategy, stop mode
+
+**Invalid Plan**:
+A Plan the planner could not make satisfy the SoC constraints; it is still returned, with the failing Leg flagged, instead of an error.
+_Avoid_: Failed route, no route
