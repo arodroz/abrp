@@ -47,3 +47,7 @@ _Avoid_: Map download (that is map tiles), region, extract
 **Map Pack**:
 A downloadable set of map tiles covering one region, installed on the phone so the map can be drawn without connectivity. Distinct from a Region Pack, which holds the road graph the Routing Engine uses.
 _Avoid_: Offline map, tile bundle, map download
+
+**Reference Consumption**:
+The single user-facing calibration number of a Vehicle Model: the energy per km the car uses at a steady 110 km/h in mild conditions. Adjusting it scales the Energy Model's predictions; it does not replace the Energy Model.
+_Avoid_: Efficiency, Wh/km setting, consumption factor
