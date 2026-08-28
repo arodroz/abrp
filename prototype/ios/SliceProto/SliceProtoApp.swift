@@ -69,7 +69,9 @@ struct RootView: View {
                 print("PROTO autotest plan ok stops=\(store.plan?.stops.count ?? 0)")
                 return
             }
-            guard newValue == 1, !autotestFired, let destination = autotestDestination else { return }
+            // SwiftUI coalesces rapid planVersion bumps (planner-init plan + style-load replan),
+            // so the first delivery may already be > 1 — fire on the first delivery, whatever it is.
+            guard newValue >= 1, !autotestFired, let destination = autotestDestination else { return }
             autotestFired = true
             autotestPending = true
             store.planTo(destination: destination)
