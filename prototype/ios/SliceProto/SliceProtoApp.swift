@@ -1,4 +1,4 @@
-// Prototype: three planner-UI variants (wayfinder #23), switchable via floating pill.
+// Prototype: planner-UI variants (wayfinder #23); locked to the decided Variant D.
 // Throwaway branch prototype/planner-ui.
 
 import CoreLocation
@@ -41,7 +41,6 @@ enum PlannerVariant: String, CaseIterable {
 
 struct RootView: View {
     @StateObject private var store = PlanStore()
-    @AppStorage("plannerUIVariant") private var variantRaw: String = PlannerVariant.google.rawValue
 
     // Autotest launch-argument hook (see parseAutotestDestination): fires once the initial
     // plan (planVersion == 1) completes, then reports the result of the autotest plan.
@@ -55,7 +54,7 @@ struct RootView: View {
     @State private var benchmarkFired = false
     @State private var benchmark: BenchmarkFlyover?
 
-    private var variant: PlannerVariant { PlannerVariant(rawValue: variantRaw) ?? .google }
+    private let variant: PlannerVariant = .google
 
     var body: some View {
         ZStack {
@@ -71,10 +70,6 @@ struct RootView: View {
                     }
                 }
             }
-
-            // Above everything else in the app, including sheets/panels raised by a variant.
-            VariantSwitcherPill(variantRaw: $variantRaw)
-                .zIndex(999)
         }
         .onAppear {
             autotestDestination = parseAutotestDestination()
@@ -123,50 +118,6 @@ struct RootView: View {
         .padding()
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Color.black)
-    }
-}
-
-/// Fixed bottom-center high-contrast pill, deliberately not part of any variant's design
-/// language, so it always reads as prototype scaffolding. Cycles with wraparound and
-/// persists the chosen variant across relaunch via @AppStorage.
-struct VariantSwitcherPill: View {
-    @Binding var variantRaw: String
-
-    private var variant: PlannerVariant { PlannerVariant(rawValue: variantRaw) ?? .google }
-    private var all: [PlannerVariant] { PlannerVariant.allCases }
-
-    var body: some View {
-        VStack {
-            Spacer()
-            HStack(spacing: 12) {
-                Button(action: cyclePrev) {
-                    Text("\u{25C0}").bold()
-                }
-                Text("\(variant.rawValue) \u{00B7} \(variant.label)")
-                    .font(.system(.footnote, design: .monospaced))
-                    .bold()
-                Button(action: cycleNext) {
-                    Text("\u{25B6}").bold()
-                }
-            }
-            .foregroundColor(.white)
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
-            .background(Color.black)
-            .clipShape(Capsule())
-            .overlay(Capsule().stroke(Color.yellow, lineWidth: 2))
-            .padding(.bottom, 24)
-        }
-    }
-
-    private func cyclePrev() {
-        let idx = all.firstIndex(of: variant) ?? 0
-        variantRaw = all[(idx - 1 + all.count) % all.count].rawValue
-    }
-
-    private func cycleNext() {
-        let idx = all.firstIndex(of: variant) ?? 0
-        variantRaw = all[(idx + 1) % all.count].rawValue
     }
 }
 
