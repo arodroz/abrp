@@ -3,3 +3,5 @@
 /target/
 /app/PlannerKit/artifacts/
 app/PlannerKit/.build/
+app/Wayfinder/Wayfinder.xcodeproj/
+app/Wayfinder/DerivedData/
