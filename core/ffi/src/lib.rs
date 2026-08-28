@@ -1,19 +1,19 @@
-//! UniFFI boundary exposing the planner to Swift.
-//!
-//! NOTE: package name `ffi`, but the crate dir is core/ffi; no uniffi
-//! dependency yet — that arrives in a later ticket.
+//! UniFFI boundary exposing the Planner to Swift (wayfinder #34, ADR 0004):
+//! one coarse `Planner` object, proc-macro exports, no UDL. Rust owns
+//! Routing, the Energy Model and Charging Stop search (pure CPU, no I/O, no
+//! async runtime); Swift owns everything else. See
+//! docs/adr/0004-rust-boundary-uniffi.md.
 
-/// Returns the name of this crate.
-pub fn crate_name() -> &'static str {
-    "ffi"
-}
+mod error;
+mod mapping;
+mod planner;
+mod types;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub use error::PlannerError;
+pub use planner::Planner;
+pub use types::{
+    FfiGeoPoint, FfiLeg, FfiLegInput, FfiPlan, FfiPlanAlt, FfiPlanRequest, FfiSocPoint, FfiStop,
+    FfiVehicle, FfiWaypoint,
+};
 
-    #[test]
-    fn returns_crate_name() {
-        assert_eq!(crate_name(), "ffi");
-    }
-}
+uniffi::setup_scaffolding!();

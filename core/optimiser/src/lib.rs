@@ -11,6 +11,6 @@ pub mod types;
 pub use corridor::{
     assemble, parse_cpack, AssembleError, AssemblyStats, CorridorRequest, CpackError,
 };
-pub use plan_api::{plan, PlanRequest};
+pub use plan_api::{plan, plan_with_cancel, PlanRequest};
 pub use search::solve;
 pub use types::*;

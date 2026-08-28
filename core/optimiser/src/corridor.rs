@@ -51,8 +51,16 @@ pub struct AssemblyStats {
 /// `Plan`/`Leg` flag from `search::solve`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AssembleError {
-    SnapFailed { lat: f64, lon: f64 },
-    NoRoute { from: (f64, f64), to: (f64, f64) },
+    SnapFailed {
+        lat: f64,
+        lon: f64,
+    },
+    NoRoute {
+        from: (f64, f64),
+        to: (f64, f64),
+    },
+    /// The caller's cancel flag was observed set (ADR 0004 point 4).
+    Cancelled,
 }
 
 impl std::fmt::Display for AssembleError {
@@ -62,6 +70,7 @@ impl std::fmt::Display for AssembleError {
                 write!(f, "no pack node near ({lat}, {lon})")
             }
             AssembleError::NoRoute { from, to } => write!(f, "no route from {from:?} to {to:?}"),
+            AssembleError::Cancelled => write!(f, "cancelled"),
         }
     }
 }
@@ -470,6 +479,7 @@ type CachedRoute = (f64, [LegEval; 4], Vec<u32>);
 /// segment, projects Charger Pack sites onto each segment's corridor,
 /// builds the graph nodes (segment-tagged per `types.rs`), and evaluates
 /// every candidate Leg once per Speed Cap.
+#[allow(clippy::too_many_arguments)]
 pub fn assemble(
     pack: &Rpack,
     router: &Router,
@@ -478,6 +488,7 @@ pub fn assemble(
     calib: &Calibration,
     req: &CorridorRequest,
     corridor_m: f64,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<(CandidateGraph, AssemblyStats), AssembleError> {
     let t0 = Instant::now();
     let mut p2p_queries: u32 = 0;
@@ -729,6 +740,12 @@ pub fn assemble(
                 scope.spawn(move || {
                     let mut out = Vec::with_capacity(pairs.len());
                     for &(f, t) in pairs {
+                        // Checked per pair (ADR 0004 point 4): each worker
+                        // stops early once cancellation is observed, rather
+                        // than finishing its whole chunk.
+                        if cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed)) {
+                            break;
+                        }
                         if let Some(route) = router.p2p(f, t) {
                             let edges: Vec<EdgeHot> = route
                                 .edges
@@ -750,6 +767,10 @@ pub fn assemble(
     });
     p2p_ms += t_parallel.elapsed().as_secs_f64() * 1000.0;
     p2p_queries += unique_pairs.len() as u32;
+
+    if cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed)) {
+        return Err(AssembleError::Cancelled);
+    }
 
     let mut legs_evaluated = 0usize;
     for &(from_idx, to_idx) in &wanted {

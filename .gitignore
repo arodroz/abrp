@@ -1,3 +1,5 @@
 *.png
 .claude/worktrees/
 /target/
+/app/PlannerKit/artifacts/
+app/PlannerKit/.build/

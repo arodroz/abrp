@@ -3,3 +3,27 @@ name = "ffi"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+
+[lib]
+name = "planner_ffi"
+crate-type = ["lib", "staticlib", "cdylib"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["cli"]
+
+[dependencies]
+packs = { path = "../packs" }
+routing = { path = "../routing" }
+energy = { path = "../energy" }
+optimiser = { path = "../optimiser" }
+# Pinned exact (ADR 0004 point 6): the newest stable release on crates.io
+# at time of writing, and the version this repo's Mac build environment
+# (docs/research/dev-environment.md) already has installed.
+uniffi = { version = "=0.32.0" }
+
+[features]
+# Pulls in uniffi_bindgen (clap, camino, ...) only for the `uniffi-bindgen`
+# bin target -- the mobile static/cdylib library build never needs it.
+cli = ["uniffi/cli"]
