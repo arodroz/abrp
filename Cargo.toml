@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = [
+    "core/packs",
+    "core/routing",
+    "core/energy",
+    "core/optimiser",
+    "core/ffi",
+    "pipeline",
+]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "MIT"
