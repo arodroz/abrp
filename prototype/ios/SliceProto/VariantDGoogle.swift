@@ -129,6 +129,12 @@ struct VariantDGoogle: View {
 
                 VStack {
                     Spacer()
+                    HStack {
+                        Spacer()
+                        locateMeButton
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 8)
                     if store.plan != nil {
                         ResultCard(store: store, expanded: $cardExpanded, onTapStop: { store.panMap(to: $0.coordinate) })
                             .frame(height: cardExpanded ? geo.size.height * 0.7 : nil)
@@ -138,10 +144,24 @@ struct VariantDGoogle: View {
                 }
             }
         }
+        .onAppear { store.requestLocationPermission() }
         .onChange(of: store.planVersion) { _, _ in store.fitToRoute() }
         .onChange(of: store.planError) { _, newValue in
             guard newValue != nil else { return }
             showToast("Outside pack region")
+        }
+    }
+
+    private var locateMeButton: some View {
+        Button {
+            store.centerOnUser()
+        } label: {
+            Image(systemName: "location.fill")
+                .font(.headline)
+                .foregroundColor(.blue)
+                .frame(width: 44, height: 44)
+                .background(.regularMaterial, in: Circle())
+                .shadow(color: .black.opacity(0.2), radius: 4, y: 2)
         }
     }
 
@@ -235,6 +255,13 @@ struct VariantDGoogle: View {
     }
 }
 
+/// "HH:mm" (24h, device timezone) for now + total_time_s, Google-directions-style.
+private func formatArrivalClock(_ totalTimeS: Double) -> String {
+    let formatter = DateFormatter()
+    formatter.dateFormat = "HH:mm"
+    return formatter.string(from: Date().addingTimeInterval(totalTimeS))
+}
+
 /// Google-directions-style bottom card: collapsed shows total time + distance/arrival + a
 /// horizontal row of Charging Stop chips; expanded (chevron or swipe) reveals the itinerary
 /// and SoC chart.
@@ -290,10 +317,13 @@ private struct ResultCard: View {
         HStack(alignment: .top) {
             VStack(alignment: .leading, spacing: 2) {
                 if let plan = store.plan {
-                    Text(formatDuration(plan.totalTimeS)).font(.title2).bold()
-                    Text("\(formatKm(plan.totalDistM)) \u{00B7} arrive \(formatSocPct(plan.arrivalSoc))")
-                        .font(.subheadline)
-                        .foregroundColor(.secondary)
+                    Text(formatArrivalClock(plan.totalTimeS)).font(.title2).bold()
+                    Text(
+                        "\(formatDuration(plan.totalTimeS)) \u{00B7} \(formatKm(plan.totalDistM))"
+                            + " \u{00B7} arrive \(formatSocPct(plan.arrivalSoc))"
+                    )
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
                 } else {
                     Text(store.isPlanning ? "Planning\u{2026}" : "No plan yet").font(.title2).bold()
                 }

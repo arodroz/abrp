@@ -23,6 +23,7 @@ targets:
         CFBundleDisplayName: SliceProto
         UILaunchScreen: {}
         CADisableMinimumFrameDurationOnPhone: true
+        NSLocationWhenInUseUsageDescription: "Shows your position and plans from where you are."
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: org.anteras.slice-proto

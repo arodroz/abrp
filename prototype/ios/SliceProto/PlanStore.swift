@@ -56,9 +56,15 @@ struct PlanErrorEvent: Identifiable, Equatable {
     let message: String
 }
 
+/// Roughly lat 49.4-53.6, lon 2.5-7.3 (LU+BE+NL pack corridor). A location fix outside this
+/// box (device far from the corridor) is ignored for origin purposes -- the LU fallback stays.
+private let corridorLatRange = 49.4...53.6
+private let corridorLonRange = 2.5...7.3
+
 @MainActor
-final class PlanStore: NSObject, ObservableObject, MLNMapViewDelegate {
+final class PlanStore: NSObject, ObservableObject, MLNMapViewDelegate, CLLocationManagerDelegate {
     let mapView: MLNMapView
+    private let locationManager = CLLocationManager()
 
     @Published var missingPaths: [String] = []
     @Published var isPlanning = false
@@ -69,11 +75,17 @@ final class PlanStore: NSObject, ObservableObject, MLNMapViewDelegate {
     /// Set when plan_json returns an "error" (e.g. destination outside the pack). `plan` and
     /// the map layers are left untouched so the previous state stays on screen.
     @Published var planError: PlanErrorEvent?
+    /// Latest CoreLocation fix, for the "locate me" button. Independent of `originCoordinate`.
+    @Published var userLocation: CLLocationCoordinate2D?
 
     // Origin/destination for the plan request. Default to LU -> Amsterdam (same as the
     // original benchmark); Variant D's search and long-press-to-set-origin override these.
+    // If a location fix lands inside the pack corridor before any long-press override, it
+    // replaces this default once (see locationManager(_:didUpdateLocations:)).
     @Published var originCoordinate = CLLocationCoordinate2D(latitude: 49.6116, longitude: 6.1319)
     @Published var destinationCoordinate = CLLocationCoordinate2D(latitude: 52.3676, longitude: 4.9041)
+    private var originOverridden = false
+    private var hasSetOriginFromLocation = false
 
     // Plan request inputs. Only departSoc re-runs planJson (debounced); the rest are
     // display-only stubs that take effect the next time departSoc changes.
@@ -107,6 +119,9 @@ final class PlanStore: NSObject, ObservableObject, MLNMapViewDelegate {
         mapView = MLNMapView(frame: .zero)
         super.init()
         mapView.delegate = self
+        mapView.showsUserLocation = true
+        locationManager.delegate = self
+        locationManager.desiredAccuracy = kCLLocationAccuracyHundredMeters
 
         let missing = findMissingPaths()
         missingPaths = missing
@@ -121,6 +136,42 @@ final class PlanStore: NSObject, ObservableObject, MLNMapViewDelegate {
                 print("PROTO ERROR missing style.json")
             }
         }
+    }
+
+    // MARK: Current location (Variant D: blue dot + default origin + locate-me button)
+
+    /// Called from Variant D's `onAppear`. Requesting again once already authorized/denied
+    /// is a no-op.
+    func requestLocationPermission() {
+        locationManager.requestWhenInUseAuthorization()
+    }
+
+    func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+        switch manager.authorizationStatus {
+        case .authorizedWhenInUse, .authorizedAlways:
+            manager.startUpdatingLocation()
+        default:
+            break
+        }
+    }
+
+    func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+        guard let coordinate = locations.last?.coordinate else { return }
+        userLocation = coordinate
+
+        guard !originOverridden, !hasSetOriginFromLocation,
+              corridorLatRange.contains(coordinate.latitude),
+              corridorLonRange.contains(coordinate.longitude)
+        else { return }
+        hasSetOriginFromLocation = true
+        originCoordinate = coordinate
+        runPlan()
+    }
+
+    /// Google-style "locate me" button: just centers the camera, doesn't touch the origin.
+    func centerOnUser() {
+        guard let userLocation else { return }
+        panMap(to: userLocation)
     }
 
     // MARK: MLNMapViewDelegate
@@ -138,29 +189,37 @@ final class PlanStore: NSObject, ObservableObject, MLNMapViewDelegate {
         let source = MLNShapeSource(identifier: "chargers", url: geojsonURL, options: options)
         style.addSource(source)
 
+        // Subdued gray-green, only from zoom ~8, so the Plan's own Charging Stops layer
+        // (bright red, added in addRouteAndStopsLayers) stays visually dominant.
+        let mutedColor = UIColor(red: 0.56, green: 0.64, blue: 0.56, alpha: 1.0)
+
         let clusterCircles = MLNCircleStyleLayer(identifier: "chargers-clusters", source: source)
         clusterCircles.predicate = NSPredicate(format: "cluster == YES")
-        clusterCircles.circleRadius = NSExpression(forConstantValue: 16.0)
-        clusterCircles.circleColor = NSExpression(forConstantValue: UIColor.systemOrange)
-        clusterCircles.circleOpacity = NSExpression(forConstantValue: 0.85)
+        clusterCircles.circleRadius = NSExpression(forConstantValue: 11.0)
+        clusterCircles.circleColor = NSExpression(forConstantValue: mutedColor)
+        clusterCircles.circleOpacity = NSExpression(forConstantValue: 0.55)
+        clusterCircles.minimumZoomLevel = 8
         style.addLayer(clusterCircles)
 
         let clusterCount = MLNSymbolStyleLayer(identifier: "chargers-cluster-count", source: source)
         clusterCount.predicate = NSPredicate(format: "cluster == YES")
         clusterCount.text = NSExpression(format: "CAST(point_count, 'NSString')")
         clusterCount.textColor = NSExpression(forConstantValue: UIColor.white)
-        clusterCount.textFontSize = NSExpression(forConstantValue: 11.0)
+        clusterCount.textFontSize = NSExpression(forConstantValue: 10.0)
+        clusterCount.minimumZoomLevel = 8
         style.addLayer(clusterCount)
 
-        let radiusStops: NSDictionary = [0: 4.0, 50: 5.0, 150: 6.5, 350: 8.0]
+        let radiusStops: NSDictionary = [0: 2.5, 50: 3.0, 150: 3.75, 350: 4.5]
         let unclustered = MLNCircleStyleLayer(identifier: "chargers-points", source: source)
         unclustered.predicate = NSPredicate(format: "cluster != YES")
         unclustered.circleRadius = NSExpression(
             format: "mgl_interpolate:withCurveType:parameters:stops:(power_kw, 'linear', nil, %@)",
             radiusStops)
-        unclustered.circleColor = NSExpression(forConstantValue: UIColor.systemGreen)
-        unclustered.circleStrokeWidth = NSExpression(forConstantValue: 1.0)
-        unclustered.circleStrokeColor = NSExpression(forConstantValue: UIColor.white)
+        unclustered.circleColor = NSExpression(forConstantValue: mutedColor)
+        unclustered.circleOpacity = NSExpression(forConstantValue: 0.6)
+        unclustered.circleStrokeWidth = NSExpression(forConstantValue: 0.5)
+        unclustered.circleStrokeColor = NSExpression(forConstantValue: UIColor.white.withAlphaComponent(0.6))
+        unclustered.minimumZoomLevel = 8
         style.addLayer(unclustered)
     }
 
@@ -225,6 +284,7 @@ final class PlanStore: NSObject, ObservableObject, MLNMapViewDelegate {
     /// Sets a new origin (Variant D's long-press-on-map) and immediately re-plans, dropping
     /// or moving a pin annotation at the new origin.
     func setOrigin(_ coordinate: CLLocationCoordinate2D) {
+        originOverridden = true
         originCoordinate = coordinate
         if let a = originAnnotation {
             a.coordinate = coordinate

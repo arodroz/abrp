@@ -22,6 +22,8 @@
 	<string>1.0</string>
 	<key>CFBundleVersion</key>
 	<string>1</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Shows your position and plans from where you are.</string>
 	<key>UILaunchScreen</key>
 	<dict/>
 </dict>
