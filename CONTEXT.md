@@ -16,6 +16,10 @@ _Avoid_: Segment, section
 A Charger chosen by the planner where the vehicle arrives at one SoC and leaves at a higher target SoC after a predicted charging duration.
 _Avoid_: Charge, stop, station
 
+**Waypoint**:
+A user-chosen place the Plan must pass through, between origin and destination; distinct from a Charging Stop, which the planner chooses. A Waypoint that is a Charger may become a Charging Stop.
+_Avoid_: Via, stop (UI copy may still say "Add stop"), intermediate destination
+
 **Charger**:
 A physical charging location with one or more connectors, a maximum power and an operator. The data object, independent of any Plan.
 _Avoid_: Station, POI, pole
