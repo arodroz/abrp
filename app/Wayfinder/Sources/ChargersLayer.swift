@@ -16,13 +16,16 @@ import UIKit
 
 enum ChargersLayer {
     static let sourceId = "chargers"
+    static let pointsLayerId = "chargers-points"
 
     static func makeSource(chargers: [CPack1Charger]) -> MLNShapeSource? {
         let features: [[String: Any]] = chargers.map { c in
-            [
+            var properties: [String: Any] = ["name": c.name, "power_kw": c.maxPowerKw]
+            if let operatorName = c.operatorName { properties["operator"] = operatorName }
+            return [
                 "type": "Feature",
                 "geometry": ["type": "Point", "coordinates": [c.lon, c.lat]],
-                "properties": ["name": c.name, "power_kw": c.maxPowerKw],
+                "properties": properties,
             ]
         }
         let collection: [String: Any] = ["type": "FeatureCollection", "features": features]
@@ -44,7 +47,7 @@ enum ChargersLayer {
         let mutedColor = UIColor(red: 0.56, green: 0.64, blue: 0.56, alpha: 1.0)
 
         let radiusStops: NSDictionary = [0: 2.5, 50: 3.0, 150: 3.75, 350: 4.5]
-        let points = MLNCircleStyleLayer(identifier: "chargers-points", source: source)
+        let points = MLNCircleStyleLayer(identifier: pointsLayerId, source: source)
         points.circleRadius = NSExpression(
             format: "mgl_interpolate:withCurveType:parameters:stops:(power_kw, 'linear', nil, %@)",
             radiusStops)

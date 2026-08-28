@@ -11,10 +11,12 @@ struct CPack1Charger: Decodable {
     let lat: Double
     let lon: Double
     let maxPowerKw: Double
+    let operatorName: String?
 
     enum CodingKeys: String, CodingKey {
         case name, lat, lon
         case maxPowerKw = "max_power_kw"
+        case operatorName = "operator"
     }
 }
 
