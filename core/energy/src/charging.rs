@@ -64,11 +64,16 @@ pub fn charge_duration_s(
         charger_max_kw
     };
 
-    const STEPS: u32 = 2000;
-    let d_soc = (to_soc - from_soc) / STEPS as f64;
+    // Step count proportional to the SoC span (same ~0.05 %-of-SoC
+    // resolution the old fixed 2000 steps gave a full 0→100 % integration),
+    // so a small span doesn't pay a full-curve price. The optimiser calls
+    // this per candidate charging decision; a fixed 2000 steps made it a
+    // measured hotspot.
+    let steps = (((to_soc - from_soc) * 2000.0).ceil() as u32).clamp(16, 2000);
+    let d_soc = (to_soc - from_soc) / steps as f64;
     let mut seconds = 0.0;
     let mut soc = from_soc;
-    for _ in 0..STEPS {
+    for _ in 0..steps {
         let mid_soc = soc + d_soc / 2.0;
         let power_kw = battery_power_kw(vehicle, battery_warmth, mid_soc).min(cap_kw);
         let energy_kwh = vehicle.usable_capacity_kwh * d_soc;
