@@ -14,7 +14,20 @@ Device: iPhone 15 Pro (iPhone16,1), iOS 26.6. Release builds.
 |---|---|---|
 | Plan latency | < 1 s | **456 ms** (route 41 ms + optimiser 412 ms; planner init 516 ms) |
 | Resident memory | < 1 GB | **694 MB peak**, 613 MB steady (phys_footprint, includes 786 MB PMTiles map + full pack) |
-| Frame rate | 120 fps sustained | **119.79 fps avg, 111.98 min** over a 46 s camera flyover along the route (min occurs in the first tile-load second; 119.97+ for the remaining 43 s) |
+| Frame rate | 120 fps sustained | ~~119.79 fps avg, 111.98 min~~ measured over a basemap that never rendered (see caveat below) — honest re-measure: **118.63 fps avg, 111.98 min** |
+
+**Frame-rate caveat and re-measure (wayfinder #26, 2026-08-28).** The
+original flyover ran over a black void: the generated style had empty
+`paint` on every layer (MapLibre defaults unset colors to black) and the
+PMTiles URL wrapped a bare file path (CFNetwork rejects it), so no tile
+was ever decoded or drawn. Both bugs were found and fixed in the planner-UI
+prototype (#23). Re-run on the same iPhone 15 Pro with the fixed style
+actually rendering (same route, `-benchmark-flyover` launch argument,
+45 s flyover): **fps_avg 118.63, fps_min 111.98, mem_peak 859.7 MB**.
+The min is still the first tile-load second; steady state oscillates
+116–120 fps with real tile decode in the frame budget. Memory peak rose
+694 → 860 MB (tile textures), still under the 1 GB bar. Verdict: both
+bars still pass; rendering the world costs ~1.2 fps on average.
 
 Plan result: 1 charging stop (Bloemenkwekerij Scheers, 360 kW, arrive 12% →
 depart 60%, 10.6 min), total 4 h 00 min, arrival SoC 14%.
