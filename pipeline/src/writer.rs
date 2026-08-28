@@ -11,8 +11,32 @@ use std::path::Path;
 use packs::{
     alignment_padding, EdgeHot, GeomVertex, HeaderFixed, NodeRecord, RegionGraphModel, RpackError,
     SectionEntry, SnapGridHeader, REGION_NAME_LEN, SECTION_CH_ORDER, SECTION_CSR,
-    SECTION_EDGES_HOT, SECTION_GEOMETRY, SECTION_NODES, SECTION_SNAP_GRID,
+    SECTION_EDGES_HOT, SECTION_GEOMETRY, SECTION_NODES, SECTION_REVERSE_CSR, SECTION_REVERSE_EDGES,
+    SECTION_SNAP_GRID,
 };
+
+/// Derives the baked reverse-adjacency CSR (format 1.1, ADR 0007): for each
+/// node, the indices into `edges` of the edges that target it, grouped by
+/// target and CSR'd. Pure function of `edges` (targets only) plus the node
+/// count -- the model itself carries no reverse-adjacency fields.
+fn build_reverse_index(n_nodes: usize, edges: &[EdgeHot]) -> (Vec<u32>, Vec<u32>) {
+    let mut counts = vec![0u32; n_nodes];
+    for e in edges {
+        counts[e.target as usize] += 1;
+    }
+    let mut reverse_csr = vec![0u32; n_nodes + 1];
+    for i in 0..n_nodes {
+        reverse_csr[i + 1] = reverse_csr[i] + counts[i];
+    }
+    let mut cursor = reverse_csr.clone();
+    let mut reverse_edges = vec![0u32; edges.len()];
+    for (i, e) in edges.iter().enumerate() {
+        let slot = &mut cursor[e.target as usize];
+        reverse_edges[*slot as usize] = i as u32;
+        *slot += 1;
+    }
+    (reverse_csr, reverse_edges)
+}
 
 /// Pack-level metadata that isn't part of the graph model itself.
 pub struct PackMeta {
@@ -72,7 +96,7 @@ pub fn write_rpack(
         });
     }
 
-    const SECTION_COUNT: usize = 6;
+    const SECTION_COUNT: usize = 8;
     let header_size = size_of::<HeaderFixed>() as u64;
     let table_len = SECTION_COUNT as u64 * size_of::<SectionEntry>() as u64;
 
@@ -139,6 +163,20 @@ pub fn write_rpack(
         &mut pos,
         SECTION_GEOMETRY,
         bytemuck::cast_slice::<GeomVertex, u8>(&model.geometry),
+    )?);
+
+    let (reverse_csr, reverse_edges) = build_reverse_index(model.nodes.len(), &model.edges);
+    entries.push(write_section(
+        &mut writer,
+        &mut pos,
+        SECTION_REVERSE_CSR,
+        bytemuck::cast_slice::<u32, u8>(&reverse_csr),
+    )?);
+    entries.push(write_section(
+        &mut writer,
+        &mut pos,
+        SECTION_REVERSE_EDGES,
+        bytemuck::cast_slice::<u32, u8>(&reverse_edges),
     )?);
 
     // SNAP_GRID is header + two arrays concatenated into one section payload.

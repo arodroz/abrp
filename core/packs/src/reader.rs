@@ -10,7 +10,7 @@ use crate::error::RpackError;
 use crate::format::{
     align_up, EdgeHot, GeomVertex, HeaderFixed, NodeRecord, SectionEntry, SnapGridHeader, ALIGN,
     FORMAT_MAJOR, MAGIC, REGION_NAME_LEN, SECTION_CH_ORDER, SECTION_CSR, SECTION_EDGES_HOT,
-    SECTION_GEOMETRY, SECTION_NODES, SECTION_SNAP_GRID,
+    SECTION_GEOMETRY, SECTION_NODES, SECTION_REVERSE_CSR, SECTION_REVERSE_EDGES, SECTION_SNAP_GRID,
 };
 
 struct SectionMeta {
@@ -38,6 +38,8 @@ const FIXED_ELEMENT_SECTIONS: &[(u32, usize)] = &[
     (SECTION_EDGES_HOT, size_of::<EdgeHot>()),
     (SECTION_CH_ORDER, size_of::<u32>()),
     (SECTION_GEOMETRY, size_of::<GeomVertex>()),
+    (SECTION_REVERSE_CSR, size_of::<u32>()),
+    (SECTION_REVERSE_EDGES, size_of::<u32>()),
 ];
 
 impl Rpack {
@@ -122,6 +124,37 @@ impl Rpack {
                 });
             }
         }
+        // Cross-section length checks: now that every section's shape is
+        // known, confirm the arrays that must agree on node/edge counts
+        // actually do, rather than trusting each section in isolation.
+        let n_nodes = sections
+            .iter()
+            .find(|s| s.id == SECTION_NODES)
+            .map(|s| s.len_bytes / size_of::<NodeRecord>() as u64)
+            .expect("presence checked above");
+        let n_edges = sections
+            .iter()
+            .find(|s| s.id == SECTION_EDGES_HOT)
+            .map(|s| s.len_bytes / size_of::<EdgeHot>() as u64)
+            .expect("presence checked above");
+        let check_len = |id: u32, expected: u64| -> Result<(), RpackError> {
+            let meta = sections
+                .iter()
+                .find(|s| s.id == id)
+                .expect("presence checked above");
+            let got = meta.len_bytes / size_of::<u32>() as u64;
+            if got != expected {
+                return Err(RpackError::Validation(format!(
+                    "section {id} has {got} elements, expected {expected}"
+                )));
+            }
+            Ok(())
+        };
+        check_len(SECTION_CSR, n_nodes + 1)?;
+        check_len(SECTION_CH_ORDER, n_nodes)?;
+        check_len(SECTION_REVERSE_CSR, n_nodes + 1)?;
+        check_len(SECTION_REVERSE_EDGES, n_edges)?;
+
         let snap_grid_meta = sections.iter().find(|s| s.id == SECTION_SNAP_GRID).ok_or(
             RpackError::MissingSection {
                 section_id: SECTION_SNAP_GRID,
@@ -295,6 +328,27 @@ impl Rpack {
 
     pub fn geometry(&self) -> &[GeomVertex] {
         bytemuck::cast_slice(self.section_bytes(SECTION_GEOMETRY))
+    }
+
+    /// CSR row index into `reverse_edge_ids()`, length `node_count() + 1`.
+    pub fn reverse_csr(&self) -> &[u32] {
+        bytemuck::cast_slice(self.section_bytes(SECTION_REVERSE_CSR))
+    }
+
+    fn reverse_edge_ids(&self) -> &[u32] {
+        bytemuck::cast_slice(self.section_bytes(SECTION_REVERSE_EDGES))
+    }
+
+    /// Indices into `edges()` for `node_id`'s incoming edges (edges whose
+    /// `target` is `node_id`), via the baked reverse-adjacency CSR. `None`
+    /// if `node_id` is out of range.
+    pub fn reverse_edge_ids_for(&self, node_id: u32) -> Option<&[u32]> {
+        let csr = self.reverse_csr();
+        let i = node_id as usize;
+        if i + 1 >= csr.len() {
+            return None;
+        }
+        Some(&self.reverse_edge_ids()[csr[i] as usize..csr[i + 1] as usize])
     }
 
     /// The `[start, end)` range into `edges()` for `node_id`'s outgoing

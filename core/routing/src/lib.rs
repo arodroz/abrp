@@ -1,16 +1,9 @@
-//! Routing Engine: contraction-hierarchy road-graph queries
+//! Routing Engine: contraction-hierarchy road-graph queries.
+//!
+//! `reference` is a plain Dijkstra over the base graph, kept as test ground
+//! truth. `Router` is the production CH query kernel over an open `Rpack`.
 
-/// Returns the name of this crate.
-pub fn crate_name() -> &'static str {
-    "routing"
-}
+pub mod reference;
+mod router;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn returns_crate_name() {
-        assert_eq!(crate_name(), "routing");
-    }
-}
+pub use router::{Route, Router};

@@ -13,7 +13,7 @@ pub use format::{
     align_up, EdgeHot, GeomVertex, HeaderFixed, NodeRecord, RegionGraphModel, SectionEntry,
     SnapGridHeader, SnapGridModel, ALIGN, CH_MIDDLE_NODE_NONE, FORMAT_MAJOR, FORMAT_MINOR, MAGIC,
     REGION_NAME_LEN, SECTION_CH_ORDER, SECTION_CSR, SECTION_EDGES_HOT, SECTION_GEOMETRY,
-    SECTION_NODES, SECTION_SNAP_GRID,
+    SECTION_NODES, SECTION_REVERSE_CSR, SECTION_REVERSE_EDGES, SECTION_SNAP_GRID,
 };
 pub use reader::{alignment_padding, Rpack};
 

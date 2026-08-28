@@ -11,3 +11,4 @@ crc32fast = "1"
 
 [dev-dependencies]
 tempfile = "3"
+routing = { path = "../core/routing" }

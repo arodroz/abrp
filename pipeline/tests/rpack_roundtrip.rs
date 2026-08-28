@@ -8,9 +8,13 @@ use std::io::{Read, Seek, SeekFrom, Write};
 
 use packs::{
     EdgeHot, GeomVertex, HeaderFixed, NodeRecord, RegionGraphModel, Rpack, RpackError,
-    SectionEntry, SnapGridHeader, SnapGridModel, CH_MIDDLE_NODE_NONE, SECTION_SNAP_GRID,
+    SectionEntry, SnapGridHeader, SnapGridModel, CH_MIDDLE_NODE_NONE, SECTION_NODES,
+    SECTION_SNAP_GRID,
 };
 use pipeline::{write_rpack, PackMeta};
+
+mod common;
+use common::Lcg;
 
 const MIN_LAT: f32 = 49.4;
 const MAX_LAT: f32 = 50.2;
@@ -20,37 +24,6 @@ const CELL_SIZE_DEG: f32 = 0.1;
 
 const N_NODES: usize = 12_000;
 const N_EDGES: usize = 45_000;
-
-/// A minimal LCG (numerical-recipes constants) so the test graph is
-/// deterministic without pulling in a `rand` dependency.
-struct Lcg(u64);
-
-impl Lcg {
-    fn new(seed: u64) -> Self {
-        Lcg(seed)
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        self.0 = self
-            .0
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        self.0
-    }
-
-    /// Uniform in `[0, 1)`.
-    fn next_f64(&mut self) -> f64 {
-        (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
-    }
-
-    fn next_range_u32(&mut self, lo: u32, hi: u32) -> u32 {
-        lo + (self.next_f64() * (hi - lo) as f64) as u32
-    }
-
-    fn next_range_f32(&mut self, lo: f32, hi: f32) -> f32 {
-        lo + self.next_f64() as f32 * (hi - lo)
-    }
-}
 
 fn snap_grid_dims() -> (u32, u32) {
     let n_rows = ((MAX_LAT - MIN_LAT) / CELL_SIZE_DEG).ceil() as u32;
@@ -213,7 +186,7 @@ fn round_trips_and_verifies() {
 
     let pack = Rpack::open(&path).unwrap();
 
-    assert_eq!(pack.format_version(), (1, 0));
+    assert_eq!(pack.format_version(), (1, 1));
     assert_eq!(pack.osm_snapshot_epoch(), meta.osm_snapshot_epoch);
     assert_eq!(pack.region_id(), meta.region_id);
     assert_eq!(pack.region_name(), meta.region_name);
@@ -245,6 +218,30 @@ fn round_trips_and_verifies() {
         assert_eq!(pack.geometry_for_edge(edge), expected);
     }
 
+    // Baked reverse adjacency (format 1.1): every edge appears exactly once,
+    // grouped under its target node.
+    let reverse_csr = pack.reverse_csr();
+    assert_eq!(reverse_csr.len(), N_NODES + 1);
+    let mut seen = vec![false; model.edges.len()];
+    for node_id in 0..N_NODES as u32 {
+        for &edge_id in pack.reverse_edge_ids_for(node_id).unwrap() {
+            assert!(
+                !seen[edge_id as usize],
+                "edge {edge_id} appears in more than one reverse bucket"
+            );
+            seen[edge_id as usize] = true;
+            assert_eq!(
+                pack.edges()[edge_id as usize].target,
+                node_id,
+                "edge {edge_id} grouped under node {node_id} but targets a different node"
+            );
+        }
+    }
+    assert!(
+        seen.iter().all(|&s| s),
+        "every edge should appear in the reverse index"
+    );
+
     // snap() on sampled coordinates matches a brute-force scan.
     let mut rng = Lcg::new(0xBEEF);
     for _ in 0..20 {
@@ -266,13 +263,16 @@ fn corrupting_a_section_byte_fails_checksum_verification() {
     let path = dir.path().join("corrupt.rpack");
     write_rpack(&model, &meta, &path).unwrap();
 
-    // Flip a byte well past the header + section table, inside the NODES payload.
+    // Flip a byte inside the NODES payload (offset computed from the section
+    // table rather than hard-coded, since the table's size shifts as
+    // sections are added).
+    let bytes = std::fs::read(&path).unwrap();
+    let flip_offset = (find_section_offset(&bytes, SECTION_NODES) + 4) as u64;
     let mut file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open(&path)
         .unwrap();
-    let flip_offset = 300u64;
     file.seek(SeekFrom::Start(flip_offset)).unwrap();
     let mut byte = [0u8; 1];
     file.read_exact(&mut byte).unwrap();

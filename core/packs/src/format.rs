@@ -8,7 +8,7 @@ use bytemuck::{Pod, Zeroable};
 
 pub const MAGIC: [u8; 4] = *b"RPCK";
 pub const FORMAT_MAJOR: u16 = 1;
-pub const FORMAT_MINOR: u16 = 0;
+pub const FORMAT_MINOR: u16 = 1;
 
 /// Fixed-width region name stored NUL-padded in the header.
 pub const REGION_NAME_LEN: usize = 32;
@@ -21,6 +21,11 @@ pub const SECTION_EDGES_HOT: u32 = 3;
 pub const SECTION_CH_ORDER: u32 = 4;
 pub const SECTION_GEOMETRY: u32 = 5;
 pub const SECTION_SNAP_GRID: u32 = 6;
+/// Format 1.1: baked reverse-adjacency CSR row index, length `n_nodes + 1`.
+pub const SECTION_REVERSE_CSR: u32 = 7;
+/// Format 1.1: edge indices into `EDGES_HOT`, grouped by target node per
+/// `SECTION_REVERSE_CSR`. Length `n_edges`.
+pub const SECTION_REVERSE_EDGES: u32 = 8;
 
 /// Rounds `n` up to the next multiple of `ALIGN` (8 bytes).
 pub const fn align_up(n: u64) -> u64 {
