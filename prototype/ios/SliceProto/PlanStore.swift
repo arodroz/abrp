@@ -33,11 +33,15 @@ func findMissingPaths() -> [String] {
     }
 }
 
-/// Reads Documents/style.json, replaces the pmtiles placeholder with a file:// path to
-/// corridor-z14.pmtiles, writes the patched copy to tmp, returns its URL.
-func patchedStyleURL() -> URL? {
+/// Reads Documents/style.json (or style-dark.json when `dark` is true and that file exists,
+/// falling back to the light style otherwise), replaces the pmtiles placeholder with a
+/// file:// path to corridor-z14.pmtiles, writes the patched copy to tmp, returns its URL.
+func patchedStyleURL(dark: Bool = false) -> URL? {
     let docs = documentsURL()
-    guard var text = try? String(contentsOf: docs.appendingPathComponent("style.json"), encoding: .utf8) else {
+    let darkURL = docs.appendingPathComponent("style-dark.json")
+    let styleURL = (dark && FileManager.default.fileExists(atPath: darkURL.path))
+        ? darkURL : docs.appendingPathComponent("style.json")
+    guard var text = try? String(contentsOf: styleURL, encoding: .utf8) else {
         return nil
     }
     let pmtilesPath = docs.appendingPathComponent("corridor-z14.pmtiles").path
@@ -78,6 +82,11 @@ final class PlanStore: NSObject, ObservableObject, MLNMapViewDelegate, CLLocatio
     @Published var planError: PlanErrorEvent?
     /// Latest CoreLocation fix, for the "locate me" button. Independent of `originCoordinate`.
     @Published var userLocation: CLLocationCoordinate2D?
+    /// Bumped whenever the map region starts changing (pan/zoom). Variant D observes this to
+    /// dismiss the charger callout card.
+    @Published var regionChangeVersion = 0
+
+    private var isDarkAppearance = false
 
     // Origin/destination for the plan request. Default to LU -> Amsterdam (same as the
     // original benchmark); Variant D's search and long-press-to-set-origin override these.
@@ -130,13 +139,25 @@ final class PlanStore: NSObject, ObservableObject, MLNMapViewDelegate, CLLocatio
             print("PROTO ERROR missing \(p)")
         }
         if missing.isEmpty {
-            if let url = patchedStyleURL() {
+            if let url = patchedStyleURL(dark: isDarkAppearance) {
                 mapView.styleURL = url
             } else {
                 missingPaths = ["style.json"]
                 print("PROTO ERROR missing style.json")
             }
         }
+    }
+
+    // MARK: Appearance (light/dark style)
+
+    /// Called from the SwiftUI root on appear and whenever `colorScheme` changes. Swaps the
+    /// map style only when the appearance actually changed; `didFinishLoading` re-adds the
+    /// route/stops/chargers layers once the new style finishes loading.
+    func setAppearance(dark: Bool) {
+        guard dark != isDarkAppearance else { return }
+        isDarkAppearance = dark
+        guard missingPaths.isEmpty, let url = patchedStyleURL(dark: dark) else { return }
+        mapView.styleURL = url
     }
 
     // MARK: Current location (Variant D: blue dot + default origin + locate-me button)
@@ -180,6 +201,12 @@ final class PlanStore: NSObject, ObservableObject, MLNMapViewDelegate, CLLocatio
     func mapView(_ mapView: MLNMapView, didFinishLoading style: MLNStyle) {
         addChargersLayers(to: style)
         runPlan()
+    }
+
+    /// Fires at the start of any pan/zoom (user drag, "locate me", fitToRoute, etc). Variant D
+    /// uses this to dismiss the charger callout card on map pan.
+    func mapView(_ mapView: MLNMapView, regionWillChangeAnimated animated: Bool) {
+        regionChangeVersion += 1
     }
 
     private func addChargersLayers(to style: MLNStyle) {

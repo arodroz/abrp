@@ -1,7 +1,19 @@
 // Prototype: three planner-UI variants (wayfinder #23), switchable via floating pill.
 // Throwaway branch prototype/planner-ui.
 
+import CoreLocation
 import SwiftUI
+
+/// Parses `-autotest-destination "lat,lon"` from the launch arguments, so an external
+/// `simctl launch ... -autotest-destination 51.22,4.40` can exercise the geocode-free back
+/// half of the search flow end to end.
+private func parseAutotestDestination() -> CLLocationCoordinate2D? {
+    let args = ProcessInfo.processInfo.arguments
+    guard let idx = args.firstIndex(of: "-autotest-destination"), idx + 1 < args.count else { return nil }
+    let parts = args[idx + 1].split(separator: ",")
+    guard parts.count == 2, let lat = Double(parts[0]), let lon = Double(parts[1]) else { return nil }
+    return CLLocationCoordinate2D(latitude: lat, longitude: lon)
+}
 
 enum PlannerVariant: String, CaseIterable {
     case sheetStack = "A"
@@ -23,6 +35,12 @@ struct RootView: View {
     @StateObject private var store = PlanStore()
     @AppStorage("plannerUIVariant") private var variantRaw: String = PlannerVariant.google.rawValue
 
+    // Autotest launch-argument hook (see parseAutotestDestination): fires once the initial
+    // plan (planVersion == 1) completes, then reports the result of the autotest plan.
+    @State private var autotestDestination: CLLocationCoordinate2D?
+    @State private var autotestFired = false
+    @State private var autotestPending = false
+
     private var variant: PlannerVariant { PlannerVariant(rawValue: variantRaw) ?? .google }
 
     var body: some View {
@@ -43,6 +61,23 @@ struct RootView: View {
             // Above everything else in the app, including sheets/panels raised by a variant.
             VariantSwitcherPill(variantRaw: $variantRaw)
                 .zIndex(999)
+        }
+        .onAppear { autotestDestination = parseAutotestDestination() }
+        .onChange(of: store.planVersion) { _, newValue in
+            if autotestPending {
+                autotestPending = false
+                print("PROTO autotest plan ok stops=\(store.plan?.stops.count ?? 0)")
+                return
+            }
+            guard newValue == 1, !autotestFired, let destination = autotestDestination else { return }
+            autotestFired = true
+            autotestPending = true
+            store.planTo(destination: destination)
+        }
+        .onChange(of: store.planError) { _, newValue in
+            guard autotestPending, let newValue else { return }
+            autotestPending = false
+            print("PROTO autotest plan error \(newValue.message)")
         }
     }
 

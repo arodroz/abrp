@@ -42,10 +42,12 @@ private final class DestinationSearchModel: NSObject, ObservableObject, MKLocalS
 }
 
 /// Wraps the shared MLNMapView with a long-press recognizer that sets the plan's origin
-/// (crude prototype affordance -- no drag-to-adjust).
+/// (crude prototype affordance -- no drag-to-adjust) and a tap recognizer that queries the
+/// all-Chargers layer for a charger callout (Variant D only).
 private struct GoogleMapView: UIViewRepresentable {
     @ObservedObject var store: PlanStore
     var onLongPress: (CLLocationCoordinate2D) -> Void
+    var onTap: (CGPoint) -> Void
 
     func makeUIView(context: Context) -> MLNMapView {
         let mapView = store.mapView
@@ -54,6 +56,13 @@ private struct GoogleMapView: UIViewRepresentable {
         recognizer.minimumPressDuration = 0.4
         mapView.addGestureRecognizer(recognizer)
         context.coordinator.recognizer = recognizer
+
+        let tapRecognizer = UITapGestureRecognizer(
+            target: context.coordinator, action: #selector(Coordinator.handleTap(_:)))
+        tapRecognizer.delegate = context.coordinator
+        mapView.addGestureRecognizer(tapRecognizer)
+        context.coordinator.tapRecognizer = tapRecognizer
+
         return mapView
     }
 
@@ -63,20 +72,29 @@ private struct GoogleMapView: UIViewRepresentable {
         if let recognizer = coordinator.recognizer {
             uiView.removeGestureRecognizer(recognizer)
         }
+        if let tapRecognizer = coordinator.tapRecognizer {
+            uiView.removeGestureRecognizer(tapRecognizer)
+        }
     }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(mapView: store.mapView, onLongPress: onLongPress)
+        Coordinator(mapView: store.mapView, onLongPress: onLongPress, onTap: onTap)
     }
 
-    final class Coordinator: NSObject {
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
         let mapView: MLNMapView
         let onLongPress: (CLLocationCoordinate2D) -> Void
+        let onTap: (CGPoint) -> Void
         var recognizer: UILongPressGestureRecognizer?
+        var tapRecognizer: UITapGestureRecognizer?
 
-        init(mapView: MLNMapView, onLongPress: @escaping (CLLocationCoordinate2D) -> Void) {
+        init(
+            mapView: MLNMapView, onLongPress: @escaping (CLLocationCoordinate2D) -> Void,
+            onTap: @escaping (CGPoint) -> Void
+        ) {
             self.mapView = mapView
             self.onLongPress = onLongPress
+            self.onTap = onTap
         }
 
         @objc func handleLongPress(_ gesture: UILongPressGestureRecognizer) {
@@ -85,29 +103,76 @@ private struct GoogleMapView: UIViewRepresentable {
             let coordinate = mapView.convert(point, toCoordinateFrom: mapView)
             onLongPress(coordinate)
         }
+
+        @objc func handleTap(_ gesture: UITapGestureRecognizer) {
+            guard gesture.state == .ended else { return }
+            onTap(gesture.location(in: mapView))
+        }
+
+        // Let our tap recognizer coexist with MapLibre's own built-in gesture recognizers
+        // (annotation selection, double-tap zoom, etc).
+        func gestureRecognizer(
+            _ gestureRecognizer: UIGestureRecognizer,
+            shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
+        ) -> Bool {
+            true
+        }
     }
+}
+
+/// A Charger's callout content (see build_pack.rs: chargers.geojson only ever writes "name"
+/// and "power_kw" -- "operator" is read defensively in case a future pack adds it).
+private struct ChargerCallout: Identifiable {
+    let id = UUID()
+    let name: String
+    let powerKw: Double
+    let operatorName: String?
+}
+
+/// One entry in the search pill's recents list (@AppStorage-backed JSON, newest first).
+private struct RecentDestination: Codable, Identifiable {
+    let name: String
+    let lat: Double
+    let lon: Double
+    var id: String { "\(name)|\(lat)|\(lon)" }
+    var coordinate: CLLocationCoordinate2D { CLLocationCoordinate2D(latitude: lat, longitude: lon) }
 }
 
 struct VariantDGoogle: View {
     @ObservedObject var store: PlanStore
     @StateObject private var searchModel = DestinationSearchModel()
     @FocusState private var searchFocused: Bool
+    @Environment(\.colorScheme) private var colorScheme
 
     @State private var searchExpanded = false
     @State private var destinationTitle: String?
     @State private var cardExpanded = false
     @State private var toast: String?
+    @State private var chargerCallout: ChargerCallout?
+    @AppStorage("recentDestinations") private var recentsRaw: String = "[]"
+
+    private var recents: [RecentDestination] {
+        (try? JSONDecoder().decode([RecentDestination].self, from: Data(recentsRaw.utf8))) ?? []
+    }
 
     var body: some View {
         GeometryReader { geo in
             ZStack(alignment: .top) {
-                GoogleMapView(store: store, onLongPress: { store.setOrigin($0) })
-                    .ignoresSafeArea()
+                GoogleMapView(
+                    store: store,
+                    onLongPress: { store.setOrigin($0) },
+                    onTap: { handleMapTap(at: $0) }
+                )
+                .ignoresSafeArea()
 
                 VStack(spacing: 8) {
                     searchPill
-                    if searchExpanded && !searchModel.results.isEmpty {
-                        suggestionsList
+                    if searchExpanded {
+                        if !searchModel.query.isEmpty && !searchModel.results.isEmpty {
+                            suggestionsList
+                        } else if searchModel.query.isEmpty && !recents.isEmpty {
+                            recentsList
+                        }
                     }
                     Spacer()
                 }
@@ -135,6 +200,11 @@ struct VariantDGoogle: View {
                     }
                     .padding(.horizontal, 16)
                     .padding(.bottom, 8)
+                    if let chargerCallout {
+                        ChargerCalloutCard(info: chargerCallout, onDismiss: { self.chargerCallout = nil })
+                            .padding(.horizontal, 12)
+                            .padding(.bottom, 8)
+                    }
                     if store.plan != nil {
                         ResultCard(store: store, expanded: $cardExpanded, onTapStop: { store.panMap(to: $0.coordinate) })
                             .frame(height: cardExpanded ? geo.size.height * 0.7 : nil)
@@ -144,12 +214,50 @@ struct VariantDGoogle: View {
                 }
             }
         }
-        .onAppear { store.requestLocationPermission() }
+        .onAppear {
+            store.requestLocationPermission()
+            store.setAppearance(dark: colorScheme == .dark)
+        }
+        .onChange(of: colorScheme) { _, newValue in store.setAppearance(dark: newValue == .dark) }
         .onChange(of: store.planVersion) { _, _ in store.fitToRoute() }
         .onChange(of: store.planError) { _, newValue in
             guard newValue != nil else { return }
             showToast("Outside pack region")
         }
+        .onChange(of: store.regionChangeVersion) { _, _ in chargerCallout = nil }
+    }
+
+    // MARK: Charger tap callout
+
+    private func handleMapTap(at point: CGPoint) {
+        let mapView = store.mapView
+        let tolerance: CGFloat = 22
+        let rect = CGRect(x: point.x - tolerance / 2, y: point.y - tolerance / 2, width: tolerance, height: tolerance)
+
+        // A cluster circle: zoom in one level centered on it instead of showing a callout.
+        let clusterHits = mapView.visibleFeatures(in: rect, styleLayerIdentifiers: ["chargers-clusters"])
+        if let cluster = clusterHits.first {
+            chargerCallout = nil
+            mapView.setCenter(cluster.coordinate, zoomLevel: mapView.zoomLevel + 1, animated: true)
+            return
+        }
+
+        let chargerHits = mapView.visibleFeatures(in: rect, styleLayerIdentifiers: ["chargers-points"])
+        guard let charger = chargerHits.first else {
+            chargerCallout = nil
+            return
+        }
+        let attrs = charger.attributes
+        let name = attrs["name"] as? String ?? "Charger"
+        let powerKw: Double
+        if let n = attrs["power_kw"] as? Double {
+            powerKw = n
+        } else if let n = attrs["power_kw"] as? NSNumber {
+            powerKw = n.doubleValue
+        } else {
+            powerKw = 0
+        }
+        chargerCallout = ChargerCallout(name: name, powerKw: powerKw, operatorName: attrs["operator"] as? String)
     }
 
     private var locateMeButton: some View {
@@ -173,6 +281,13 @@ struct VariantDGoogle: View {
                 TextField("Search destination", text: $searchModel.query)
                     .focused($searchFocused)
                     .submitLabel(.search)
+                if !searchModel.query.isEmpty {
+                    Button {
+                        searchModel.query = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill").foregroundColor(.secondary)
+                    }
+                }
             } else {
                 Text(destinationTitle ?? "Search destination")
                     .foregroundColor(destinationTitle == nil ? .secondary : .primary)
@@ -183,13 +298,13 @@ struct VariantDGoogle: View {
                 ProgressView().scaleEffect(0.8)
             }
             if searchExpanded {
-                Button {
+                Button("Cancel") {
                     searchFocused = false
                     withAnimation { searchExpanded = false }
                     searchModel.query = ""
-                } label: {
-                    Image(systemName: "xmark.circle.fill").foregroundColor(.secondary)
                 }
+                .font(.subheadline)
+                .foregroundColor(.blue)
             }
         }
         .padding(.horizontal, 14)
@@ -202,6 +317,30 @@ struct VariantDGoogle: View {
             withAnimation { searchExpanded = true }
             searchFocused = true
         }
+    }
+
+    private var recentsList: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(recents) { recent in
+                Button {
+                    selectRecent(recent)
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: "clock").foregroundColor(.secondary)
+                        Text(recent.name).font(.subheadline).foregroundColor(.primary).lineLimit(1)
+                        Spacer()
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                }
+                .buttonStyle(.plain)
+                if recent.id != recents.last?.id {
+                    Divider().padding(.leading, 14)
+                }
+            }
+        }
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .shadow(color: .black.opacity(0.15), radius: 6, y: 2)
     }
 
     private var suggestionsList: some View {
@@ -242,8 +381,26 @@ struct VariantDGoogle: View {
                     return
                 }
                 destinationTitle = completion.title
+                addRecent(name: completion.title, coordinate: coordinate)
                 store.planTo(destination: coordinate)
             }
+        }
+    }
+
+    private func selectRecent(_ recent: RecentDestination) {
+        searchFocused = false
+        withAnimation { searchExpanded = false }
+        searchModel.query = ""
+        destinationTitle = recent.name
+        store.planTo(destination: recent.coordinate)
+    }
+
+    private func addRecent(name: String, coordinate: CLLocationCoordinate2D) {
+        var list = recents.filter { $0.name != name }
+        list.insert(RecentDestination(name: name, lat: coordinate.latitude, lon: coordinate.longitude), at: 0)
+        list = Array(list.prefix(5))
+        if let data = try? JSONEncoder().encode(list), let json = String(data: data, encoding: .utf8) {
+            recentsRaw = json
         }
     }
 
@@ -410,5 +567,33 @@ private struct ResultCard: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
+    }
+}
+
+/// Small floating card shown when the user taps an unclustered Charger on the map, above the
+/// ResultCard, dismissed on map pan or by tapping elsewhere.
+private struct ChargerCalloutCard: View {
+    let info: ChargerCallout
+    var onDismiss: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(info.name).font(.headline).lineLimit(1)
+                Text(
+                    "\(Int(info.powerKw)) kW" + (info.operatorName.map { " \u{00B7} \($0)" } ?? "")
+                )
+                .font(.caption)
+                .foregroundColor(.secondary)
+            }
+            Spacer()
+            Button(action: onDismiss) {
+                Image(systemName: "xmark.circle.fill").foregroundColor(.secondary)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .shadow(color: .black.opacity(0.15), radius: 6, y: 2)
     }
 }
