@@ -80,6 +80,10 @@ _Avoid_: Charge limit, target SoC (that is the per-stop departure SoC the planne
 The user preference between few long Charging Stops, the quickest arrival, and many short Charging Stops.
 _Avoid_: Charging strategy, stop mode
 
+**Speed Cap**:
+The maximum cruise speed the planner assumes for a Leg when lower than the road's own speeds, chosen so a Charging Stop can be skipped or reached; absent on an uncapped Leg.
+_Avoid_: Speed adaptation, slow-down, eco speed
+
 **Trip Log**:
 The record of one real drive used to calibrate the Energy Model: an automatically captured GPS trace with timestamps and ambient temperature, plus the dash SoC entered by the driver at start and end.
 _Avoid_: Drive log, telemetry, trip history
