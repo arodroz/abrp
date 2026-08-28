@@ -1,17 +1,18 @@
-// Wayfinder app entry (wayfinder #39). The UI surfaces (map, route editor,
-// arrival card, settings) are separate later tickets -- RootView is a
-// placeholder for now.
+// Wayfinder app entry (wayfinder #39). The map surface is RootView (#42); the route editor,
+// arrival card, and settings are separate later tickets.
 import SwiftUI
 
 @main
 struct WayfinderApp: App {
+    private let store = PlanStore()
+
     init() {
-        Autotest.runIfRequested()
+        Autotest.runIfRequested(store: store)
     }
 
     var body: some Scene {
         WindowGroup {
-            RootView()
+            RootView(store: store)
         }
     }
 }

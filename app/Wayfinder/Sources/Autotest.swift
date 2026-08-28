@@ -5,18 +5,27 @@
 // proves a plan() round-trip through the real xcframework on the simulator,
 // independent of the (placeholder) UI.
 import Foundation
+import MapLibre
 import PlannerKit
 
 enum Autotest {
-    static func runIfRequested() {
+    static func runIfRequested(store: PlanStore) {
         let args = ProcessInfo.processInfo.arguments
         guard let flagIndex = args.firstIndex(of: "--autotest"),
-              flagIndex + 1 < args.count,
-              args[flagIndex + 1] == "plan-golden"
+              flagIndex + 1 < args.count
         else { return }
 
-        Task.detached(priority: .userInitiated) {
-            await runPlanGolden()
+        switch args[flagIndex + 1] {
+        case "plan-golden":
+            Task.detached(priority: .userInitiated) {
+                await runPlanGolden()
+            }
+        case "map-smoke":
+            Task.detached(priority: .userInitiated) {
+                await runMapSmoke(store: store)
+            }
+        default:
+            break
         }
     }
 
@@ -99,5 +108,59 @@ enum Autotest {
         }
 
         await finish(ok: ok)
+    }
+
+    // MARK: map-smoke
+
+    /// Brings up the real map surface (via the app's shared PlanStore, same instance RootView
+    /// renders) and checks: the style finishes loading, the pmtiles vector source is present,
+    /// the Chargers layer is built from all 1,549 sideloaded chargers, and running the golden
+    /// LU -> Amsterdam plan (same request as `runPlanGolden`) adds the route + stops layers.
+    @MainActor
+    private static func runMapSmoke(store: PlanStore) async {
+        store.load()
+
+        let styleLoaded = await waitWithTimeout(seconds: 20) { store.isStyleLoaded }
+        report("style-loaded", styleLoaded)
+        guard styleLoaded else { await finish(ok: false) }
+
+        let pmtilesSourcePresent = store.mapView.style?.source(withIdentifier: "protomaps") != nil
+        report("pmtiles-source-present", pmtilesSourcePresent)
+
+        let chargersReady = await waitWithTimeout(seconds: 15) { store.chargerCount > 0 }
+        let chargersOK = chargersReady && store.chargerCount == 1549
+        report("chargers-count", chargersOK, "expected 1549, got \(store.chargerCount)")
+
+        var ok = styleLoaded && pmtilesSourcePresent && chargersOK
+
+        do {
+            let plan = try await store.runPlan(goldenRequest())
+
+            let routePresent = store.mapView.style?.layer(withIdentifier: RouteLayer.routeLineId) != nil
+            report("route-layer-present", routePresent)
+            ok = ok && routePresent
+
+            let stopsPresent = store.mapView.style?.layer(withIdentifier: RouteLayer.stopsCirclesId) != nil
+            let stopCountOK = plan.stops.count == 1
+            report("stops-layer-present", stopsPresent && stopCountOK, "expected 1 stop, got \(plan.stops.count)")
+            ok = ok && stopsPresent && stopCountOK
+        } catch {
+            report("route-layer-present", false, "\(error)")
+            report("stops-layer-present", false)
+            ok = false
+        }
+
+        await finish(ok: ok)
+    }
+
+    /// Polls `condition` every 100ms until it's true or `seconds` elapses.
+    @MainActor
+    private static func waitWithTimeout(seconds: Double, until condition: () -> Bool) async -> Bool {
+        let deadline = DispatchTime.now() + seconds
+        while !condition() {
+            if DispatchTime.now() >= deadline { return condition() }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        return true
     }
 }

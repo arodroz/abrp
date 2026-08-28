@@ -6,6 +6,9 @@ options:
 packages:
   PlannerKit:
     path: ../PlannerKit
+  MapLibre:
+    url: https://github.com/maplibre/maplibre-gl-native-distribution
+    exactVersion: 6.29.0
 
 targets:
   Wayfinder:
@@ -23,6 +26,8 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_CFBundleDisplayName: Wayfinder
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_NSLocationWhenInUseUsageDescription: "Shows map data and charging stops for your route."
+        INFOPLIST_KEY_CADisableMinimumFrameDurationOnPhone: YES
         TARGETED_DEVICE_FAMILY: "1"
         SWIFT_VERSION: "5.0"
         MARKETING_VERSION: "1.0"
@@ -30,3 +35,5 @@ targets:
     dependencies:
       - package: PlannerKit
         product: PlannerKit
+      - package: MapLibre
+        product: MapLibre

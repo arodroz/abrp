@@ -2,8 +2,9 @@
 
 `PlannerKit/` wraps the Rust planner as a SwiftPM package (binary xcframework at
 `PlannerKit/artifacts/planner_ffi.xcframework`). `Wayfinder/` is the iOS app scaffold
-(wayfinder #39): app entry + `PlanStore` + pack sideload wiring + a placeholder root view.
-The map, route editor, arrival card, and settings UI are separate later tickets.
+(wayfinder #39) plus the map surface (wayfinder #42): app entry + `PlanStore` + pack sideload
+wiring + a full-screen MapLibre map (PMTiles Map Pack, Chargers layer, route + Charging Stop
+layers from a Plan). The search UI, result card, and settings UI are separate later tickets.
 
 ## Generate the Xcode project
 
@@ -33,21 +34,25 @@ xcrun simctl install booted /path/to/DerivedData/.../Wayfinder.app
 xcrun simctl launch booted org.anteras.wayfinder
 ```
 
-## Sideload a Region Pack
+## Sideload a Region Pack + Map Pack
 
-The app looks for `<region>.rpack` + `<region>-chargers.json` in its Documents directory
-(`Packs.swift`; region id defaults to `corridor`). There is no in-app installer yet (that's
-M3) -- sideload by copying files into the booted app's container:
+The app looks for `<region>.rpack` + `<region>-chargers.json` + `<region>.pmtiles` +
+`style-light.json` + `style-dark.json` in its Documents directory (`Packs.swift`; region id
+defaults to `corridor`). There is no in-app installer yet (that's M3) -- sideload by copying
+files into the booted app's container:
 
 ```sh
 CONTAINER=$(xcrun simctl get_app_container booted org.anteras.wayfinder data)
 cp ~/abrp-data/dist/corridor/corridor.rpack "$CONTAINER/Documents/"
 cp ~/abrp-data/dist/corridor/corridor-chargers.json "$CONTAINER/Documents/"
+cp ~/abrp-data/dist/corridor/corridor.pmtiles "$CONTAINER/Documents/"
+cp ~/abrp-data/dist/corridor/style-light.json "$CONTAINER/Documents/"
+cp ~/abrp-data/dist/corridor/style-dark.json "$CONTAINER/Documents/"
 ```
 
 `get_app_container` only resolves while the simulator is booted and the app is installed.
 
-## Run the autotest
+## Run the autotests
 
 Launching with `--autotest plan-golden` runs the golden LU -> Amsterdam plan() round-trip
 against the sideloaded `corridor` pack and prints `WAYFINDER-AUTOTEST: ...` pass/fail lines,
@@ -57,4 +62,14 @@ then exits with a nonzero status on failure:
 xcrun simctl launch --console-pty booted org.anteras.wayfinder --autotest plan-golden
 ```
 
-Without the launch argument, the app starts normally and shows the placeholder root view.
+Launching with `--autotest map-smoke` brings up the real map surface (the same `PlanStore`
+RootView renders), waits for the style to finish loading, and checks: the pmtiles vector
+source is present, the Chargers layer is built from all 1,549 sideloaded chargers, and running
+the golden plan adds the route + Charging Stop layers:
+
+```sh
+xcrun simctl launch --console-pty booted org.anteras.wayfinder --autotest map-smoke
+```
+
+Without a launch argument, the app starts normally and shows the map, centered on the
+Luxembourg corridor, with a small status overlay while the pack + planner load.

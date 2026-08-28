@@ -1,20 +1,42 @@
-// Placeholder root view (wayfinder #39). The real map/route-editor UI is a
-// separate later ticket; this just proves pack sideload + PlannerKit wiring
-// are working end to end.
+// The map surface (wayfinder #42): the map IS the root surface, full-screen, with a small
+// status overlay while the pack + planner are loading. Search UI, the result card/bottom
+// sheet, and settings are separate later tickets (#40, #43, #44).
 import SwiftUI
 
 struct RootView: View {
-    @State private var store = PlanStore()
+    let store: PlanStore
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
-        VStack(spacing: 16) {
-            Text("Wayfinder")
-                .font(.largeTitle.bold())
+        ZStack(alignment: .top) {
+            PlannerMapView(store: store)
+                .ignoresSafeArea()
+            if !isReady {
+                statusOverlay
+            }
+        }
+        .onAppear {
+            store.setAppearance(dark: colorScheme == .dark)
+            store.load()
+        }
+        .onChange(of: colorScheme) { _, newValue in
+            store.setAppearance(dark: newValue == .dark)
+        }
+    }
+
+    private var isReady: Bool {
+        store.plannerStatus == .ready
+    }
+
+    private var statusOverlay: some View {
+        VStack(spacing: 8) {
             Text(packStatusText)
             Text(plannerStatusText)
         }
-        .padding()
-        .onAppear { store.load() }
+        .font(.footnote)
+        .padding(10)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
+        .padding(.top, 48)
     }
 
     private var packStatusText: String {
