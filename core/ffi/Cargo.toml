@@ -13,6 +13,11 @@ name = "uniffi-bindgen"
 path = "src/bin/uniffi-bindgen.rs"
 required-features = ["cli"]
 
+[[bin]]
+name = "plan_cli"
+path = "src/bin/plan_cli.rs"
+required-features = ["cli"]
+
 [dependencies]
 packs = { path = "../packs" }
 routing = { path = "../routing" }
