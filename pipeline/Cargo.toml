@@ -3,3 +3,11 @@ name = "pipeline"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+
+[dependencies]
+packs = { path = "../core/packs" }
+bytemuck = "1"
+crc32fast = "1"
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,16 +1,5 @@
-//! Mac-side builders that produce installable Packs from open data feeds
+//! Mac-side builders that produce installable Packs from open data feeds.
 
-/// Returns the name of this crate.
-pub fn crate_name() -> &'static str {
-    "pipeline"
-}
+pub mod writer;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn returns_crate_name() {
-        assert_eq!(crate_name(), "pipeline");
-    }
-}
+pub use writer::{write_rpack, PackMeta, WriteError};
