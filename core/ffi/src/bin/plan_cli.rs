@@ -74,6 +74,20 @@ fn main() {
         );
     }
 
+    // The slider-replan case the cross-call corridor cache (issue #38)
+    // exists for: only `depart_soc` changes, so this should skip corridor
+    // assembly and go straight to `search::solve`.
+    let mut slider_request = request.clone();
+    slider_request.depart_soc = 0.85;
+    let t0 = Instant::now();
+    let _ = planner
+        .plan(slider_request)
+        .expect("warm plan() soc=0.85 failed");
+    println!(
+        "plan() warm soc=0.85: {:.1}ms",
+        t0.elapsed().as_secs_f64() * 1000.0
+    );
+
     print_plan_shape(&plan);
 }
 

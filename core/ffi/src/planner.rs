@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use energy::{edge_energy_wh, Conditions, EdgeInput};
-use optimiser::ChargerSite;
+use optimiser::{ChargerSite, PlanCache};
 use packs::Rpack;
 use routing::Router;
 
@@ -16,13 +16,15 @@ use crate::mapping::{
 };
 use crate::types::{FfiLegInput, FfiPlan, FfiPlanRequest};
 
-/// Interior mutability for the two things that change after construction:
-/// the loaded Charger sites and the cancel flag (ADR 0004 point 4). The
-/// open `Rpack` itself never mutates, so it needs no lock.
+/// Interior mutability for the things that change after construction: the
+/// loaded Charger sites, the cross-call corridor cache (issue #38), and the
+/// cancel flag (ADR 0004 point 4). The open `Rpack` itself never mutates, so
+/// it needs no lock.
 #[derive(uniffi::Object)]
 pub struct Planner {
     pack: Rpack,
     chargers: Mutex<Option<Vec<ChargerSite>>>,
+    plan_cache: Mutex<PlanCache>,
     cancel_flag: AtomicBool,
 }
 
@@ -44,12 +46,16 @@ impl Planner {
         Ok(Arc::new(Self {
             pack,
             chargers: Mutex::new(None),
+            plan_cache: Mutex::new(PlanCache::new()),
             cancel_flag: AtomicBool::new(false),
         }))
     }
 
     /// Parses a Charger Pack (`format` must be `"cpack-1"`) and stores its
     /// sites, replacing any previously loaded set. Returns the site count.
+    /// Clears the corridor cache (issue #38): the charger set is a key
+    /// assembly input but, unlike the rest, isn't cheap to compare on every
+    /// `plan()` call, so a fresh load just invalidates outright.
     pub fn load_chargers(&self, bytes: Vec<u8>, format: String) -> Result<u32, PlannerError> {
         validate_cpack_format(&format)?;
         let sites = optimiser::parse_cpack(&bytes).map_err(|e| PlannerError::InvalidRequest {
@@ -57,6 +63,10 @@ impl Planner {
         })?;
         let count = sites.len() as u32;
         *self.chargers.lock().expect("chargers mutex poisoned") = Some(sites);
+        self.plan_cache
+            .lock()
+            .expect("plan cache mutex poisoned")
+            .clear();
         Ok(count)
     }
 
@@ -80,13 +90,15 @@ impl Planner {
         let plan_request = plan_request_of(&request, corridor);
 
         let router = Router::new(&self.pack);
-        let (plan, _stats) = optimiser::plan_with_cancel(
+        let mut cache = self.plan_cache.lock().expect("plan cache mutex poisoned");
+        let (plan, _stats) = optimiser::plan_with_cache(
             &self.pack,
             &router,
             sites,
             &vehicle,
             &calibration,
             &plan_request,
+            &mut cache,
             Some(&self.cancel_flag),
         )
         .map_err(map_assemble_error)?;

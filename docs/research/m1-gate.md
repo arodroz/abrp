@@ -32,6 +32,10 @@ Device detail: `planner_init` (mmap) 0.3–2.7 ms, charger load ~5 ms for 1,549 
 
 Three of four measurable bars pass and core parity is confirmed; warm `plan()` misses the < 1 s bar. The pre-named perf levers (opt-level, cross-call leg cache, stall-on-demand, m2m early-stop, cached Router) move to #38, which now gates M1 completion. CI green across the workspace at 2541d97.
 
+## Addendum (2026-08-28, #38)
+
+The perf levers landed same-day: stall-on-demand in the CH p2p kernel (~44 % of settles stalled, bit-identical routes), a cross-call corridor cache in the Planner (a replan with unchanged route-shaping inputs skips assembly), and `ffi-release` opt-level `"s"` → `3`. `plan_cli` in `ffi-release` after: cold first plan **1026 ms** (was 1306 ms), warm **22 ms** (was 1286–1323 ms), SoC-slider replan 21.6 ms, peak RSS 736 MB. Predicted on-device at the ~1.9× factor: ~2.0 s cold / ~40 ms warm — to be confirmed at the next milestone's phone unlock. Detail: issue #38.
+
 ## Reproduce
 
 ```sh

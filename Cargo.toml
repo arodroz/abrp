@@ -20,7 +20,7 @@ license = "MIT"
 # touch `[profile.release]`, which the rest of the workspace still uses.
 [profile.ffi-release]
 inherits = "release"
-opt-level = "s"
+opt-level = 3
 lto = "fat"
 codegen-units = 1
 strip = true

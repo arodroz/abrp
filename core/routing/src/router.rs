@@ -95,10 +95,65 @@ impl<'a> Router<'a> {
         self.unpack_edge(right, out);
     }
 
+    /// Stall-on-demand for the forward search (Geisberger et al.): `v` is
+    /// stalled if some node `u` with strictly HIGHER contraction rank
+    /// already has a forward label (`dist_f[u]` finite, from some other
+    /// ascending path from `source` that never went through `v`) and an
+    /// edge `u -> v` -- a "down" edge from `u`'s perspective, which the
+    /// up-only forward relaxation deliberately never follows when it
+    /// settles `u` (`u`'s own relaxation only continues to strictly-higher
+    /// ranks, never back down to `v`) -- such that `dist_f[u] + w(u,v)` is
+    /// cheaper than `v`'s current label. That witness proves `dist_f[v]` is
+    /// not `v`'s true shortest distance from `source`, so `v` cannot be the
+    /// peak of the true shortest path -- its up-edges are not relaxed.
+    /// Checking `ch_order[u] < ch_order[v]` here instead would be a
+    /// tautology: those are exactly the up-edges the search already used
+    /// when it settled `u`, so by the heap's monotonic pop order
+    /// `dist_f[u] + w >= dist_f[v]` always holds and the check could never
+    /// fire. Uses the pack's baked reverse CSR to find `v`'s incoming edges
+    /// without a linear scan.
+    fn forward_is_stalled(&self, v: u32, dist_f: &[f64], ch_order: &[u32]) -> bool {
+        let Some(in_edges) = self.pack.reverse_edge_ids_for(v) else {
+            return false;
+        };
+        in_edges.iter().any(|&idx| {
+            let u = self.from_of_edge[idx as usize];
+            ch_order[u as usize] > ch_order[v as usize]
+                && dist_f[u as usize] + edge_cost(&self.pack.edges()[idx as usize])
+                    < dist_f[v as usize]
+        })
+    }
+
+    /// Stall-on-demand for the backward search: the mirror of
+    /// `forward_is_stalled`. The backward search settles nodes via the
+    /// reverse CSR, extending to strictly HIGHER-ranked predecessors; the
+    /// edge set it never follows from a settled node `u` is `u`'s own
+    /// outgoing edges (original forward CSR) to a node `w` that is *also*
+    /// strictly higher-ranked than `u` but was reached earlier via some
+    /// other path -- so `w`'s already-known `dist_b[w]` can undercut `u`'s
+    /// label via that unfollowed edge. Mirrors forward's use of the CSR
+    /// opposite the one its own relaxation walks, with the same
+    /// higher-rank-witness filter.
+    fn backward_is_stalled(&self, u: u32, dist_b: &[f64], ch_order: &[u32]) -> bool {
+        let Some(range) = self.pack.edge_range(u) else {
+            return false;
+        };
+        range.into_iter().any(|idx| {
+            let e = &self.pack.edges()[idx];
+            let w = e.target;
+            ch_order[w as usize] > ch_order[u as usize]
+                && dist_b[w as usize] + edge_cost(e) < dist_b[u as usize]
+        })
+    }
+
     /// Bidirectional CH point-to-point search: forward search relaxes only
     /// edges going "up" in contraction rank; backward search does the same
-    /// over the reverse index. No stall-on-demand in v1 -- known perf lever,
-    /// left for a later pass once query latency is measured.
+    /// over the reverse index. Stall-on-demand prunes, in each direction,
+    /// any settled node provably not on the true shortest path (a
+    /// higher-ranked node already reaches it more cheaply via a "down" edge
+    /// the search's own up-only relaxation never follows) -- such a node's
+    /// up-edges are not relaxed, and it is not considered as a meeting
+    /// candidate.
     pub fn p2p(&self, source: u32, target: u32) -> Option<Route> {
         if source == target {
             return Some(Route {
@@ -142,22 +197,24 @@ impl<'a> Router<'a> {
                 let Reverse(HeapKey(d, u)) = heap_f.pop().unwrap();
                 if !settled_f[u as usize] && d <= dist_f[u as usize] {
                     settled_f[u as usize] = true;
-                    if settled_b[u as usize] {
-                        let total = dist_f[u as usize] + dist_b[u as usize];
-                        if total < best {
-                            best = total;
-                            meeting = Some(u);
+                    if !self.forward_is_stalled(u, &dist_f, ch_order) {
+                        if settled_b[u as usize] {
+                            let total = dist_f[u as usize] + dist_b[u as usize];
+                            if total < best {
+                                best = total;
+                                meeting = Some(u);
+                            }
                         }
-                    }
-                    if let Some(range) = self.pack.edge_range(u) {
-                        for idx in range {
-                            let e = &self.pack.edges()[idx];
-                            if ch_order[e.target as usize] > ch_order[u as usize] {
-                                let nd = dist_f[u as usize] + edge_cost(e);
-                                if nd < dist_f[e.target as usize] {
-                                    dist_f[e.target as usize] = nd;
-                                    prev_edge_f[e.target as usize] = Some(idx as u32);
-                                    heap_f.push(Reverse(HeapKey(nd, e.target)));
+                        if let Some(range) = self.pack.edge_range(u) {
+                            for idx in range {
+                                let e = &self.pack.edges()[idx];
+                                if ch_order[e.target as usize] > ch_order[u as usize] {
+                                    let nd = dist_f[u as usize] + edge_cost(e);
+                                    if nd < dist_f[e.target as usize] {
+                                        dist_f[e.target as usize] = nd;
+                                        prev_edge_f[e.target as usize] = Some(idx as u32);
+                                        heap_f.push(Reverse(HeapKey(nd, e.target)));
+                                    }
                                 }
                             }
                         }
@@ -169,23 +226,25 @@ impl<'a> Router<'a> {
                 let Reverse(HeapKey(d, u)) = heap_b.pop().unwrap();
                 if !settled_b[u as usize] && d <= dist_b[u as usize] {
                     settled_b[u as usize] = true;
-                    if settled_f[u as usize] {
-                        let total = dist_f[u as usize] + dist_b[u as usize];
-                        if total < best {
-                            best = total;
-                            meeting = Some(u);
+                    if !self.backward_is_stalled(u, &dist_b, ch_order) {
+                        if settled_f[u as usize] {
+                            let total = dist_f[u as usize] + dist_b[u as usize];
+                            if total < best {
+                                best = total;
+                                meeting = Some(u);
+                            }
                         }
-                    }
-                    if let Some(in_edges) = self.pack.reverse_edge_ids_for(u) {
-                        for &idx in in_edges {
-                            let src = self.from_of_edge[idx as usize];
-                            if ch_order[src as usize] > ch_order[u as usize] {
-                                let e = &self.pack.edges()[idx as usize];
-                                let nd = dist_b[u as usize] + edge_cost(e);
-                                if nd < dist_b[src as usize] {
-                                    dist_b[src as usize] = nd;
-                                    prev_edge_b[src as usize] = Some(idx);
-                                    heap_b.push(Reverse(HeapKey(nd, src)));
+                        if let Some(in_edges) = self.pack.reverse_edge_ids_for(u) {
+                            for &idx in in_edges {
+                                let src = self.from_of_edge[idx as usize];
+                                if ch_order[src as usize] > ch_order[u as usize] {
+                                    let e = &self.pack.edges()[idx as usize];
+                                    let nd = dist_b[u as usize] + edge_cost(e);
+                                    if nd < dist_b[src as usize] {
+                                        dist_b[src as usize] = nd;
+                                        prev_edge_b[src as usize] = Some(idx);
+                                        heap_b.push(Reverse(HeapKey(nd, src)));
+                                    }
                                 }
                             }
                         }
