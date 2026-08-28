@@ -15,6 +15,14 @@ private func parseAutotestDestination() -> CLLocationCoordinate2D? {
     return CLLocationCoordinate2D(latitude: lat, longitude: lon)
 }
 
+/// Parses `-benchmark-flyover` from the launch arguments (no value needed), like
+/// `-autotest-destination` above: when present, re-runs the original wayfinder #15
+/// CADisplayLink fps/memory probe + camera flyover once the initial plan completes, to
+/// re-measure against the fixed basemap style. See BenchmarkFlyover.swift.
+private func parseBenchmarkFlyover() -> Bool {
+    ProcessInfo.processInfo.arguments.contains("-benchmark-flyover")
+}
+
 enum PlannerVariant: String, CaseIterable {
     case sheetStack = "A"
     case formFirst = "B"
@@ -41,6 +49,12 @@ struct RootView: View {
     @State private var autotestFired = false
     @State private var autotestPending = false
 
+    // Benchmark launch-argument hook (see parseBenchmarkFlyover): fires once the initial plan
+    // (planVersion == 1) completes, same as the autotest hook above.
+    @State private var benchmarkFlyoverRequested = false
+    @State private var benchmarkFired = false
+    @State private var benchmark: BenchmarkFlyover?
+
     private var variant: PlannerVariant { PlannerVariant(rawValue: variantRaw) ?? .google }
 
     var body: some View {
@@ -62,7 +76,10 @@ struct RootView: View {
             VariantSwitcherPill(variantRaw: $variantRaw)
                 .zIndex(999)
         }
-        .onAppear { autotestDestination = parseAutotestDestination() }
+        .onAppear {
+            autotestDestination = parseAutotestDestination()
+            benchmarkFlyoverRequested = parseBenchmarkFlyover()
+        }
         .onChange(of: store.planVersion) { _, newValue in
             if autotestPending {
                 autotestPending = false
@@ -75,6 +92,15 @@ struct RootView: View {
             autotestFired = true
             autotestPending = true
             store.planTo(destination: destination)
+        }
+        .onChange(of: store.planVersion) { _, newValue in
+            // Same first-delivery gate as the autotest hook above.
+            guard benchmarkFlyoverRequested, newValue >= 1, !benchmarkFired else { return }
+            benchmarkFired = true
+            let flyover = BenchmarkFlyover(
+                mapView: store.mapView, routeCoordinates: store.plan?.routeCoordinates ?? [])
+            benchmark = flyover
+            flyover.start()
         }
         .onChange(of: store.planError) { _, newValue in
             guard autotestPending, let newValue else { return }
