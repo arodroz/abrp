@@ -47,11 +47,14 @@ func patchedStyleURL() -> URL? {
     return dst
 }
 
-// Fixed origin/destination for this prototype (LU -> Amsterdam), same as the benchmark.
-private let originCoord = (lat: 49.6116, lon: 6.1319)
-private let destCoord = (lat: 52.3676, lon: 4.9041)
-
 // MARK: - PlanStore: owns the map view, the planner, the Plan, and all request inputs.
+
+/// A failed/snapping-failed plan response (see plan_json's "error" field in lib.rs). Carries
+/// a fresh id per occurrence so SwiftUI's onChange fires even for repeated identical messages.
+struct PlanErrorEvent: Identifiable, Equatable {
+    let id = UUID()
+    let message: String
+}
 
 @MainActor
 final class PlanStore: NSObject, ObservableObject, MLNMapViewDelegate {
@@ -60,6 +63,17 @@ final class PlanStore: NSObject, ObservableObject, MLNMapViewDelegate {
     @Published var missingPaths: [String] = []
     @Published var isPlanning = false
     @Published var plan: Plan?
+    /// Incremented on every successful plan; Variant D observes this to fit the camera to
+    /// the new route (see CONTEXT.md "Plan").
+    @Published var planVersion = 0
+    /// Set when plan_json returns an "error" (e.g. destination outside the pack). `plan` and
+    /// the map layers are left untouched so the previous state stays on screen.
+    @Published var planError: PlanErrorEvent?
+
+    // Origin/destination for the plan request. Default to LU -> Amsterdam (same as the
+    // original benchmark); Variant D's search and long-press-to-set-origin override these.
+    @Published var originCoordinate = CLLocationCoordinate2D(latitude: 49.6116, longitude: 6.1319)
+    @Published var destinationCoordinate = CLLocationCoordinate2D(latitude: 52.3676, longitude: 4.9041)
 
     // Plan request inputs. Only departSoc re-runs planJson (debounced); the rest are
     // display-only stubs that take effect the next time departSoc changes.
@@ -87,6 +101,7 @@ final class PlanStore: NSObject, ObservableObject, MLNMapViewDelegate {
     private var cachedPlanner: Planner?
     private var replanWorkItem: DispatchWorkItem?
     private var scrubAnnotation: MLNPointAnnotation?
+    private var originAnnotation: MLNPointAnnotation?
 
     override init() {
         mapView = MLNMapView(frame: .zero)
@@ -168,8 +183,8 @@ final class PlanStore: NSObject, ObservableObject, MLNMapViewDelegate {
         isPlanning = true
 
         let request: [String: Any] = [
-            "origin": [originCoord.lat, originCoord.lon],
-            "dest": [destCoord.lat, destCoord.lon],
+            "origin": [originCoordinate.latitude, originCoordinate.longitude],
+            "dest": [destinationCoordinate.latitude, destinationCoordinate.longitude],
             "depart_soc": departSoc,
             "arrival_min_soc": destinationArrivalSoc,
             "charger_arrival_min_soc": chargerArrivalSoc,
@@ -201,12 +216,44 @@ final class PlanStore: NSObject, ObservableObject, MLNMapViewDelegate {
         cachedPlanner = p
     }
 
+    /// Sets a new destination and immediately re-plans (Variant D's search flow).
+    func planTo(destination: CLLocationCoordinate2D) {
+        destinationCoordinate = destination
+        runPlan()
+    }
+
+    /// Sets a new origin (Variant D's long-press-on-map) and immediately re-plans, dropping
+    /// or moving a pin annotation at the new origin.
+    func setOrigin(_ coordinate: CLLocationCoordinate2D) {
+        originCoordinate = coordinate
+        if let a = originAnnotation {
+            a.coordinate = coordinate
+        } else {
+            let a = MLNPointAnnotation()
+            a.coordinate = coordinate
+            a.title = "Origin"
+            mapView.addAnnotation(a)
+            originAnnotation = a
+        }
+        runPlan()
+    }
+
     private func handlePlanResponse(_ json: String) {
         isPlanning = false
         guard let data = json.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else {
             print("PROTO ERROR bad plan response")
+            return
+        }
+
+        // plan_json returns a 200-shaped-but-empty response with an "error" field on failure
+        // (e.g. NO_ROUTE, destination outside the pack). Leave `plan` and the map layers
+        // untouched so the previous state stays on screen; PlanErrorEvent lets a variant
+        // (Variant D) surface a toast.
+        if let errorMsg = obj["error"] as? String {
+            print("PROTO plan error: \(errorMsg)")
+            planError = PlanErrorEvent(message: errorMsg)
             return
         }
 
@@ -255,6 +302,7 @@ final class PlanStore: NSObject, ObservableObject, MLNMapViewDelegate {
             routeCoordinates: routeCoords,
             arrivalSoc: arrivalSoc
         )
+        planVersion += 1
         stopOverrides = [:]
         selectedDistanceM = nil
 
@@ -344,6 +392,29 @@ final class PlanStore: NSObject, ObservableObject, MLNMapViewDelegate {
 
     func panMap(to coordinate: CLLocationCoordinate2D) {
         mapView.setCenter(coordinate, animated: true)
+    }
+
+    /// Fits the camera to the current plan's route (Variant D, called after a replan).
+    func fitToRoute() {
+        guard let plan, !plan.routeCoordinates.isEmpty else { return }
+        var minLat = plan.routeCoordinates[0].latitude
+        var maxLat = minLat
+        var minLon = plan.routeCoordinates[0].longitude
+        var maxLon = minLon
+        for c in plan.routeCoordinates {
+            minLat = min(minLat, c.latitude)
+            maxLat = max(maxLat, c.latitude)
+            minLon = min(minLon, c.longitude)
+            maxLon = max(maxLon, c.longitude)
+        }
+        let bounds = MLNCoordinateBoundsMake(
+            CLLocationCoordinate2D(latitude: minLat, longitude: minLon),
+            CLLocationCoordinate2D(latitude: maxLat, longitude: maxLon))
+        mapView.setVisibleCoordinateBounds(
+            bounds,
+            edgePadding: UIEdgeInsets(top: 110, left: 40, bottom: 260, right: 40),
+            animated: true,
+            completionHandler: nil)
     }
 
     /// nearest soc_curve sample by distance -> nearest route point by fraction of total

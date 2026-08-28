@@ -7,21 +7,23 @@ enum PlannerVariant: String, CaseIterable {
     case sheetStack = "A"
     case formFirst = "B"
     case drivingOverlay = "C"
+    case google = "D"
 
     var label: String {
         switch self {
         case .sheetStack: return "Sheet stack"
         case .formFirst: return "Form-first"
         case .drivingOverlay: return "Driving overlay"
+        case .google: return "Google"
         }
     }
 }
 
 struct RootView: View {
     @StateObject private var store = PlanStore()
-    @AppStorage("plannerUIVariant") private var variantRaw: String = PlannerVariant.sheetStack.rawValue
+    @AppStorage("plannerUIVariant") private var variantRaw: String = PlannerVariant.google.rawValue
 
-    private var variant: PlannerVariant { PlannerVariant(rawValue: variantRaw) ?? .sheetStack }
+    private var variant: PlannerVariant { PlannerVariant(rawValue: variantRaw) ?? .google }
 
     var body: some View {
         ZStack {
@@ -33,6 +35,7 @@ struct RootView: View {
                     case .sheetStack: VariantASheetStack(store: store)
                     case .formFirst: VariantBFormFirst(store: store)
                     case .drivingOverlay: VariantCDrivingOverlay(store: store)
+                    case .google: VariantDGoogle(store: store)
                     }
                 }
             }
@@ -66,7 +69,7 @@ struct RootView: View {
 struct VariantSwitcherPill: View {
     @Binding var variantRaw: String
 
-    private var variant: PlannerVariant { PlannerVariant(rawValue: variantRaw) ?? .sheetStack }
+    private var variant: PlannerVariant { PlannerVariant(rawValue: variantRaw) ?? .google }
     private var all: [PlannerVariant] { PlannerVariant.allCases }
 
     var body: some View {
