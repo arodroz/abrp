@@ -2,3 +2,4 @@ ios/.spm/
 slice/target/
 ios/SliceProto.xcodeproj/
 ios/DerivedData/
+ios/DerivedData-sim/

@@ -41,7 +41,8 @@ func patchedStyleURL() -> URL? {
         return nil
     }
     let pmtilesPath = docs.appendingPathComponent("corridor-z14.pmtiles").path
-    text = text.replacingOccurrences(of: "pmtiles://PMTILES_URL_PLACEHOLDER", with: "pmtiles://" + pmtilesPath)
+    // pmtiles:// wraps a full URL, not a bare path — a path here dies in CFNetwork as "unsupported URL".
+    text = text.replacingOccurrences(of: "pmtiles://PMTILES_URL_PLACEHOLDER", with: "pmtiles://file://" + pmtilesPath)
     let dst = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("slice-proto-style.json")
     guard (try? text.write(to: dst, atomically: true, encoding: .utf8)) != nil else { return nil }
     return dst
