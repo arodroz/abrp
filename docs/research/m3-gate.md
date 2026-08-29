@@ -76,3 +76,22 @@ search state + `from_of_edge` precomputed once in the Planner): Mac cold
 at eu-west scale: cold-from-launch 0.36 s, footprint 482 MB, all seven
 autotest modes green. Routes are bit-identical (same traversal, sparse
 storage). Device numbers seal at the next unlock.
+
+## Sealed device numbers (wayfinder #54)
+
+Date: 2026-08-29, iPhone 15 Pro, Release build ba30d27, eu-west active.
+Three perf runs (first run after a fresh app install excluded per this doc's
+own protocol: 1.73 s / 431 MB page-in run):
+
+| Measure | eu-west (device, sealed) | at the failed gate | ADR 0001 bar |
+|---|---|---|---|
+| Cold-start → first plan | **526–536 ms** | 11.8–11.9 s | < 3 s ✓ (5.6×) |
+| Warm `plan()` | **13.5–14.2 ms** | 102–105 ms | < 1 s ✓ |
+| SoC-slider replan | 13.0–14.7 ms | 101–104 ms | ✓ |
+| `phys_footprint` (planner path) | **431–445 MB** | 1172–1316 MB | < 1 GB ✓ |
+
+All four store-driven modes (map surface + planner in one process) pass on
+the device — the 91 MB allocator abort is gone. Goldens digit-identical
+throughout. **M3's bars pass on the device; the milestone's verdict stands
+closed.** Corridor retired from the hosted catalog and the phone's
+sideloaded corridor files cleaned in the same session (#54).
