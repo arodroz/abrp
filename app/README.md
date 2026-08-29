@@ -52,6 +52,19 @@ cp ~/abrp-data/dist/corridor/style-dark.json "$CONTAINER/Documents/"
 
 `get_app_container` only resolves while the simulator is booted and the app is installed.
 
+## Installing packs from the catalog
+
+The M3 installer (wayfinder #47, ADR 0011) fetches `https://wayfinder-packs.home.anteras.org`'s
+hosted catalog -- reachable over Tailscale/home Wi-Fi, not the open internet -- and can install
+or refresh any region from the Packs section of the settings sheet: index -> per-region catalog
+-> per-artifact sha256-driven download (a background `URLSession`, Wi-Fi-only by default) ->
+verify -> all-or-nothing commit into Documents. Sideloading (above) is still how the golden
+autotests (`plan-golden`, `map-smoke`, `editor-smoke`, `card-smoke`, `settings-smoke`, `perf`)
+get their `corridor` pack -- ADR 0011 deliberately doesn't adopt the sideloaded copy into the
+installer's bookkeeping, so the Packs section lists `corridor` as "Not installed" until the M3
+gate deletes and reinstalls it through the app. `--autotest install-smoke` exercises the
+installer's real code path end-to-end against the small `lu-dev` region instead.
+
 ## Run the autotests
 
 Launching with `--autotest plan-golden` runs the golden LU -> Amsterdam plan() round-trip
@@ -83,6 +96,12 @@ override swapping the map style.
 Launching with `--autotest perf` measures the ADR 0001 M2 gate numbers -- cold-start ->
 first-plan, cold/warm/departSoc-replan `plan()` latency, and `phys_footprint` memory --
 through `PlannerClient` directly, guarded by the same golden shape asserts as plan-golden.
+
+Launching with `--autotest install-smoke` exercises the pack installer's real code path against
+the live hosted catalog: fetches the index, installs the small `lu-dev` region (a real ~49MB
+download over Tailscale/home Wi-Fi), opens a `PlannerClient` on the installed rpack and parses
+its Charger Pack, then deletes the region and checks cleanup. Requires the pack bucket to be
+reachable; leaves the sideloaded `corridor` pack untouched.
 
 Without a launch argument, the app starts normally and shows the map, centered on the
 Luxembourg corridor, with a small status overlay while the pack + planner load.

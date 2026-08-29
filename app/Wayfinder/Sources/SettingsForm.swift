@@ -5,17 +5,41 @@
 // binds straight to a PlanStore var and its own didSet-triggered replan -- there's no local
 // @State here. Dropped "Max speed" (Speed Caps are a planner OUTPUT, not a request field --
 // ADR 0010 point 1) and "Extra weight" (no request field); added the Headwind stepper and the
-// Appearance section.
+// Appearance section. The Packs section (wayfinder #47) lists every index region against
+// PackInstaller's rows with Install/Update/Use/Delete actions.
+import Foundation
 import PlannerKit
 import SwiftUI
 
 struct SettingsForm: View {
     @Bindable var store: PlanStore
+    @Bindable var installer: PackInstaller
     @Environment(\.dismiss) private var dismiss
+    @State private var pendingDeleteRegionId: String?
 
     var body: some View {
         NavigationStack {
             Form {
+                Section("Packs") {
+                    ForEach(installer.rows) { row in
+                        packRow(row)
+                    }
+                    Toggle("Allow cellular downloads", isOn: $installer.allowCellularDownloads)
+                }
+                .confirmationDialog(
+                    "Delete \(pendingDeleteRegionName)?",
+                    isPresented: Binding(
+                        get: { pendingDeleteRegionId != nil },
+                        set: { if !$0 { pendingDeleteRegionId = nil } }
+                    )
+                ) {
+                    Button("Delete", role: .destructive) {
+                        if let id = pendingDeleteRegionId { try? installer.delete(region: id) }
+                        pendingDeleteRegionId = nil
+                    }
+                    Button("Cancel", role: .cancel) { pendingDeleteRegionId = nil }
+                }
+
                 Section("Battery") {
                     VStack(alignment: .leading) {
                         Text("Departure SoC: \(formatSocPct(store.departSoc))")
@@ -108,4 +132,74 @@ struct SettingsForm: View {
             set: { store.referenceConsumptionWhPerKm = $0 }
         )
     }
+
+    // MARK: Packs section (wayfinder #47)
+
+    private var pendingDeleteRegionName: String {
+        guard let id = pendingDeleteRegionId else { return "" }
+        return installer.rows.first(where: { $0.id == id })?.name ?? id
+    }
+
+    @ViewBuilder
+    private func packRow(_ row: PackInstaller.RegionRow) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                VStack(alignment: .leading) {
+                    Text(row.name)
+                    Text(packRowSubtitle(row)).font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                packRowButtons(row)
+            }
+            if let fraction = row.downloadFraction {
+                ProgressView(value: fraction)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func packRowButtons(_ row: PackInstaller.RegionRow) -> some View {
+        HStack(spacing: 12) {
+            if row.downloadFraction == nil {
+                if row.installedEpoch == nil {
+                    Button("Install") { Task { try? await installer.install(region: row.id) } }
+                } else {
+                    if row.updateAvailable {
+                        Button("Update") { Task { try? await installer.install(region: row.id) } }
+                    }
+                    Button("Use") { store.setActiveRegion(row.id) }
+                        .disabled(row.id == store.activeRegion)
+                    Button("Delete", role: .destructive) { pendingDeleteRegionId = row.id }
+                }
+            }
+        }
+        .buttonStyle(.borderless)
+    }
+
+    private func packRowSubtitle(_ row: PackInstaller.RegionRow) -> String {
+        let sizeSuffix = row.totalBytes.map { " \u{00B7} \(Self.byteCountFormatter.string(fromByteCount: $0))" } ?? ""
+        if let fraction = row.downloadFraction {
+            return "Downloading \(Int(fraction * 100))%"
+        }
+        guard let installedEpoch = row.installedEpoch else {
+            return "Not installed" + sizeSuffix
+        }
+        let dateText = Self.epochDateFormatter.string(from: Date(timeIntervalSince1970: TimeInterval(installedEpoch)))
+        if row.updateAvailable {
+            return "Update available (installed \(dateText))"
+        }
+        return "Installed \(dateText)" + sizeSuffix
+    }
+
+    private static let byteCountFormatter: ByteCountFormatter = {
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        return formatter
+    }()
+
+    private static let epochDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        return formatter
+    }()
 }

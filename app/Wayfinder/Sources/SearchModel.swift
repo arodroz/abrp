@@ -4,12 +4,20 @@ import CoreLocation
 import Foundation
 import MapKit
 
-/// Roughly lat 49.4-53.6, lon 2.5-7.3 (Benelux corridor) -- biases MKLocalSearchCompleter's
-/// suggestions per the pack's actual coverage.
-let corridorRegion = MKCoordinateRegion(
-    center: CLLocationCoordinate2D(latitude: 51.5, longitude: 4.9),
-    span: MKCoordinateSpan(latitudeDelta: 4.2, longitudeDelta: 4.8)
-)
+/// Biases MKLocalSearchCompleter's suggestions per the corridor pack's actual coverage --
+/// derived from RegionBounds.swift's shared table (wayfinder #47) rather than a second
+/// hardcoded copy of the same box.
+let corridorRegion: MKCoordinateRegion = {
+    let box = RegionBounds.box(for: "corridor")
+    return MKCoordinateRegion(
+        center: CLLocationCoordinate2D(
+            latitude: (box.latRange.lowerBound + box.latRange.upperBound) / 2,
+            longitude: (box.lonRange.lowerBound + box.lonRange.upperBound) / 2),
+        span: MKCoordinateSpan(
+            latitudeDelta: box.latRange.upperBound - box.latRange.lowerBound,
+            longitudeDelta: box.lonRange.upperBound - box.lonRange.lowerBound)
+    )
+}()
 
 /// Wraps MKLocalSearchCompleter for live suggestions as the user types. NSObject/
 /// MKLocalSearchCompleterDelegate conformance needs `ObservableObject`, not `@Observable`.

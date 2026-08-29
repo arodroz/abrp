@@ -13,7 +13,11 @@
 // path, so setting e.g. `store.departSoc` directly exercises exactly what
 // the sheet's Slider would trigger. `--autotest perf` (wayfinder #45) measures
 // the ADR 0001 M2 gate numbers -- cold-start/plan latency/memory -- through
-// PlannerClient directly, like plan-golden.
+// PlannerClient directly, like plan-golden. `--autotest install-smoke`
+// (wayfinder #47) exercises the installer's real code path against the live
+// hosted catalog: fetches the index, installs the small lu-dev region (a
+// real ~49MB download), opens a PlannerClient on the installed rpack and
+// parses its Charger Pack, then deletes the region and checks cleanup.
 import CoreLocation
 import Darwin
 import Foundation
@@ -21,7 +25,7 @@ import MapLibre
 import PlannerKit
 
 enum Autotest {
-    static func runIfRequested(store: PlanStore) {
+    static func runIfRequested(store: PlanStore, installer: PackInstaller) {
         let args = ProcessInfo.processInfo.arguments
         guard let flagIndex = args.firstIndex(of: "--autotest"),
               flagIndex + 1 < args.count
@@ -51,6 +55,10 @@ enum Autotest {
         case "perf":
             Task.detached(priority: .userInitiated) {
                 await runPerf()
+            }
+        case "install-smoke":
+            Task.detached(priority: .userInitiated) {
+                await runInstallSmoke(installer: installer)
             }
         default:
             break
@@ -568,6 +576,92 @@ enum Autotest {
         }
         guard kr == KERN_SUCCESS else { return 0 }
         return Double(info.phys_footprint) / 1_048_576.0
+    }
+
+    // MARK: install-smoke
+
+    /// Exercises the installer's real code path against the live hosted catalog (wayfinder
+    /// #47): fetches the index, installs lu-dev (a real ~49MB download, small enough to run in
+    /// an autotest), checks the installed files and record, opens a PlannerClient on the
+    /// installed rpack and parses its Charger Pack (lu-dev's known 17 chargers), then deletes
+    /// the region and checks the artifact files + record are gone while the shared style files
+    /// remain.
+    @MainActor
+    private static func runInstallSmoke(installer: PackInstaller) async {
+        var ok = true
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+
+        let index: PackIndex
+        do {
+            index = try await PackCatalogClient.fetchIndex()
+        } catch {
+            report("index-fetch", false, "\(error)")
+            await finish(ok: false)
+        }
+        let luDevPresent = index.regions.contains { $0.id == "lu-dev" }
+        let regionsOk = index.regions.count >= 2 && luDevPresent
+        report("index-regions", regionsOk, "count=\(index.regions.count) lu-dev-present=\(luDevPresent)")
+        ok = ok && regionsOk
+
+        do {
+            try await installer.install(region: "lu-dev")
+            report("install-lu-dev", true)
+        } catch {
+            report("install-lu-dev", false, "\(error)")
+            await finish(ok: false)
+        }
+
+        let expectedFiles = ["lu-dev.rpack", "lu-dev-chargers.json", "lu-dev.pmtiles", "style-light.json", "style-dark.json"]
+        let filesOk = expectedFiles.allSatisfy { FileManager.default.fileExists(atPath: docs.appendingPathComponent($0).path) }
+        report("install-files-present", filesOk, filesOk ? "" : "one or more of \(expectedFiles) missing")
+        ok = ok && filesOk
+
+        let record = PackInstaller.loadRecord(region: "lu-dev")
+        let catalogEpoch = (try? await PackCatalogClient.fetchCatalog(region: "lu-dev"))?.osmSnapshotEpoch
+        let epochOk = record != nil && catalogEpoch != nil && record?.epoch == catalogEpoch
+        report(
+            "installed-epoch-matches", epochOk,
+            "installed=\(String(describing: record?.epoch)) catalog=\(String(describing: catalogEpoch))"
+        )
+        ok = ok && epochOk
+
+        do {
+            let rpackURL = docs.appendingPathComponent("lu-dev.rpack")
+            let chargersURL = docs.appendingPathComponent("lu-dev-chargers.json")
+            let client = try PlannerClient(regionPackPath: rpackURL.path)
+            let chargerBytes = try Data(contentsOf: chargersURL)
+            try client.loadChargers(bytes: chargerBytes, format: "cpack-1")
+            let chargers = try CPack1.parseChargers(data: chargerBytes)
+            let countOk = chargers.count == 17
+            report("lu-dev-charger-count", countOk, "expected 17, got \(chargers.count)")
+            ok = ok && countOk
+        } catch {
+            report("lu-dev-charger-count", false, "\(error)")
+            ok = false
+        }
+
+        do {
+            try installer.delete(region: "lu-dev")
+            report("delete-lu-dev", true)
+        } catch {
+            report("delete-lu-dev", false, "\(error)")
+            ok = false
+        }
+
+        let deletedFilesGone = ["lu-dev.rpack", "lu-dev-chargers.json", "lu-dev.pmtiles"].allSatisfy {
+            !FileManager.default.fileExists(atPath: docs.appendingPathComponent($0).path)
+        }
+        let recordGone = PackInstaller.loadRecord(region: "lu-dev") == nil
+        let stylesRemain = ["style-light.json", "style-dark.json"].allSatisfy {
+            FileManager.default.fileExists(atPath: docs.appendingPathComponent($0).path)
+        }
+        report(
+            "delete-cleanup", deletedFilesGone && recordGone && stylesRemain,
+            "filesGone=\(deletedFilesGone) recordGone=\(recordGone) stylesRemain=\(stylesRemain)"
+        )
+        ok = ok && deletedFilesGone && recordGone && stylesRemain
+
+        await finish(ok: ok)
     }
 
     /// Polls `condition` every 100ms until it's true or `seconds` elapses.

@@ -6,7 +6,10 @@
 // bootstrap, and, for the arrival-card ticket (#43), the stop-free alternative toggle and the
 // SoC-scrub marker sync (ported from prototype/planner-ui's PlanStore.updateScrubMarker()), and,
 // for the settings sheet (#44), didSet-triggered replans on every planner-affecting request
-// field plus the appearance override (the only setting that persists, to UserDefaults).
+// field plus the appearance override (the only setting that persists, to UserDefaults), and,
+// for the pack installer (#47), `region` becoming a persisted `activeRegion` with a
+// `setActiveRegion(_:)` that resets route state and reloads, and the corridor-only origin gate
+// generalizing to RegionBounds.swift's per-region table.
 import CoreLocation
 import Foundation
 import MapLibre
@@ -25,12 +28,6 @@ struct EditorWaypoint: Identifiable, Equatable {
             && lhs.coordinate.longitude == rhs.coordinate.longitude
     }
 }
-
-/// Roughly lat 49.4-53.6, lon 2.5-7.3 (Benelux corridor) -- a location fix outside this box
-/// is ignored for origin purposes. SearchModel.swift's `corridorRegion` covers the same
-/// area for MKLocalSearchCompleter's suggestion bias.
-private let corridorLatRange = 49.4...53.6
-private let corridorLonRange = 2.5...7.3
 
 @MainActor
 @Observable
@@ -172,26 +169,55 @@ final class PlanStore: NSObject, MLNMapViewDelegate, CLLocationManagerDelegate {
     private var hasStartedLoad = false
     private var hasSetInitialCamera = false
 
-    private let region = "corridor"
+    /// The persisted active region (wayfinder #47), UserDefaults key `activeRegion`, default
+    /// "corridor" -- `setActiveRegion(_:)` is the only way to change it.
+    private(set) var activeRegion: String
+    private static let activeRegionKey = "activeRegion"
 
     override init() {
         appearanceOverride = UserDefaults.standard.string(forKey: Self.appearanceOverrideKey) ?? "system"
+        activeRegion = UserDefaults.standard.string(forKey: Self.activeRegionKey) ?? "corridor"
         super.init()
         mapView.delegate = self
         mapView.showsUserLocation = true
         locationManager.delegate = self
     }
 
+    /// Persists the new active region, resets route state (a plan/stops belong to the previous
+    /// region's pack), and re-runs `load()` against it.
+    func setActiveRegion(_ region: String) {
+        guard region != activeRegion else { return }
+        activeRegion = region
+        UserDefaults.standard.set(region, forKey: Self.activeRegionKey)
+
+        destination = nil
+        waypoints = []
+        plan = nil
+        showingAlternative = false
+        selectedDistanceM = nil
+        generation += 1
+
+        hasStartedLoad = false
+        located = nil
+        client = nil
+        chargersForMap = nil
+        chargerCount = 0
+        plannerStatus = .idle
+        packStatus = .missing
+
+        load()
+    }
+
     func load() {
         guard !hasStartedLoad else { return }
         hasStartedLoad = true
 
-        guard let located = Packs.locate(region: region) else {
+        guard let located = Packs.locate(region: activeRegion) else {
             packStatus = .missing
             return
         }
         self.located = located
-        packStatus = .loaded(region: region)
+        packStatus = .loaded(region: activeRegion)
         plannerStatus = .loading
         applyStyle(located: located)
 
@@ -397,15 +423,16 @@ final class PlanStore: NSObject, MLNMapViewDelegate, CLLocationManagerDelegate {
         replan()
     }
 
-    /// Runs on a fix inside the corridor bounds, once, unless the origin was already
-    /// overridden by a long-press -- adopts it as the origin and replans if a destination is
-    /// already set. editor-smoke pins the origin via setOrigin before loading, so adoption
-    /// never affects it; on a plain launch inside the corridor the fix is adopted as
+    /// Runs on a fix inside the active region's bounds (RegionBounds.swift), once, unless the
+    /// origin was already overridden by a long-press -- adopts it as the origin and replans if
+    /// a destination is already set. editor-smoke pins the origin via setOrigin before loading,
+    /// so adoption never affects it; on a plain launch inside the region the fix is adopted as
     /// intended.
     private func adoptLocationFixAsOriginIfEligible(_ coordinate: CLLocationCoordinate2D) {
+        let box = RegionBounds.box(for: activeRegion)
         guard !originOverridden, !hasSetOriginFromLocationFix,
-              corridorLatRange.contains(coordinate.latitude),
-              corridorLonRange.contains(coordinate.longitude)
+              box.latRange.contains(coordinate.latitude),
+              box.lonRange.contains(coordinate.longitude)
         else { return }
         hasSetOriginFromLocationFix = true
         originCoordinate = coordinate

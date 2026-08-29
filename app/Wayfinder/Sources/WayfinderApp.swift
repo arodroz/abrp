@@ -1,5 +1,7 @@
 // Wayfinder app entry (wayfinder #39). The map surface is RootView (#42); the route editor,
-// arrival card, and settings are separate later tickets.
+// arrival card, and settings are separate later tickets. The pack installer (#47) is owned
+// here too, alongside PlanStore, and checked for updates once on launch (fire-and-forget --
+// offline must never block startup).
 import Foundation
 import SwiftUI
 
@@ -13,15 +15,18 @@ struct WayfinderApp: App {
     nonisolated static let launchUptime = ProcessInfo.processInfo.systemUptime
 
     private let store = PlanStore()
+    private let packInstaller = PackInstaller()
 
     init() {
         _ = Self.launchUptime
-        Autotest.runIfRequested(store: store)
+        Autotest.runIfRequested(store: store, installer: packInstaller)
+        let installer = packInstaller
+        Task { await installer.checkForUpdates() }
     }
 
     var body: some Scene {
         WindowGroup {
-            RootView(store: store)
+            RootView(store: store, installer: packInstaller)
         }
     }
 }

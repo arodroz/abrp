@@ -10,6 +10,7 @@ import SwiftUI
 
 struct RootView: View {
     let store: PlanStore
+    let installer: PackInstaller
     @Environment(\.colorScheme) private var colorScheme
 
     @State private var toast: String?
@@ -81,7 +82,7 @@ struct RootView: View {
             if let message = store.planErrorMessage { showToast(message) }
         }
         .sheet(isPresented: Binding(get: { store.showingSettings }, set: { store.showingSettings = $0 })) {
-            SettingsForm(store: store)
+            SettingsForm(store: store, installer: installer)
                 .presentationDetents([.medium, .large])
         }
     }
@@ -103,7 +104,7 @@ struct RootView: View {
 
     private var packStatusText: String {
         switch store.packStatus {
-        case .missing: return "Pack: missing"
+        case .missing: return "No pack installed -- go to Settings \u{2192} Packs to install one"
         case .loaded(let region): return "Pack: \(region) found"
         }
     }
