@@ -331,11 +331,12 @@ fn parse_irve_fr_str(s: &str) -> Vec<ChargerRecord> {
 
         let connectors = irve_row_connectors(&row);
         let power_w = row.puissance_nominale * 1000.0;
-        let row_best_ccs = if connectors.iter().any(|c| is_ccs(&c.standard)) && power_w >= MIN_DC_POWER_W {
-            power_w
-        } else {
-            0.0
-        };
+        let row_best_ccs =
+            if connectors.iter().any(|c| is_ccs(&c.standard)) && power_w >= MIN_DC_POWER_W {
+                power_w
+            } else {
+                0.0
+            };
 
         let acc = stations.entry(station_id.clone()).or_insert_with(|| {
             order.push(station_id.clone());
@@ -484,8 +485,10 @@ fn parse_bnetza_str(ladestation: &str, ladepunkt: &str, stecker: &str) -> Vec<Ch
         .deserialize::<BnetzaStation>()
     {
         let Ok(row) = result else { continue };
-        let (Some(lat), Some(lon)) = (parse_de_float(&row.breitengrad), parse_de_float(&row.laengengrad))
-        else {
+        let (Some(lat), Some(lon)) = (
+            parse_de_float(&row.breitengrad),
+            parse_de_float(&row.laengengrad),
+        ) else {
             continue;
         };
         order.push(row.ladestation_id.clone());

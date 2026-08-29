@@ -8,8 +8,8 @@ use std::io::{Read, Seek, SeekFrom, Write};
 
 use packs::{
     EdgeHot, GeomVertex, HeaderFixed, NodeRecord, RegionGraphModel, Rpack, RpackError,
-    SectionEntry, SnapGridHeader, SnapGridModel, CH_MIDDLE_NODE_NONE, SECTION_NODES,
-    SECTION_SNAP_GRID,
+    SectionEntry, SnapGridHeader, SnapGridModel, CH_MIDDLE_NODE_NONE, SECTION_CH_ORDER,
+    SECTION_CSR, SECTION_EDGES_HOT, SECTION_NODES, SECTION_REVERSE_EDGES, SECTION_SNAP_GRID,
 };
 use pipeline::{write_rpack, PackMeta};
 
@@ -379,4 +379,228 @@ fn refuses_snap_grid_with_non_monotone_cell_offsets() {
     std::fs::write(&path, &bytes).unwrap();
 
     assert!(Rpack::open(&path).is_err());
+}
+
+/// Finds the absolute file offset of `section_id`'s table *entry* (as
+/// opposed to `find_section_offset`, which returns its payload offset), so
+/// tests can byte-patch `section_id`/`offset`/`len_bytes` directly.
+fn find_table_entry_offset(bytes: &[u8], section_id: u32) -> usize {
+    let header_size = std::mem::size_of::<HeaderFixed>();
+    let entry_size = std::mem::size_of::<SectionEntry>();
+    let header: HeaderFixed = bytemuck::pod_read_unaligned(&bytes[0..header_size]);
+    for i in 0..header.section_count as usize {
+        let start = header_size + i * entry_size;
+        let entry: SectionEntry = bytemuck::pod_read_unaligned(&bytes[start..start + entry_size]);
+        if entry.section_id == section_id {
+            return start;
+        }
+    }
+    panic!("section {section_id} not found in section table");
+}
+
+// --- M-04: cheap structural checks at `open` ---------------------------
+
+#[test]
+fn refuses_duplicate_section_ids() {
+    let model = build_model(6);
+    let meta = build_meta();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("duplicate_section.rpack");
+    write_rpack(&model, &meta, &path).unwrap();
+
+    let mut bytes = std::fs::read(&path).unwrap();
+    // section_id is the entry's first field (u32 at offset 0).
+    let ch_order_entry = find_table_entry_offset(&bytes, SECTION_CH_ORDER);
+    bytes[ch_order_entry..ch_order_entry + 4].copy_from_slice(&SECTION_NODES.to_le_bytes());
+    std::fs::write(&path, &bytes).unwrap();
+
+    match Rpack::open(&path) {
+        Err(RpackError::DuplicateSection { section_id }) => assert_eq!(section_id, SECTION_NODES),
+        Err(other) => panic!("expected DuplicateSection, got {other}"),
+        Ok(_) => panic!("expected DuplicateSection, got Ok"),
+    }
+}
+
+#[test]
+fn refuses_sections_overlapping_each_other() {
+    let model = build_model(7);
+    let meta = build_meta();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("overlapping_sections.rpack");
+    write_rpack(&model, &meta, &path).unwrap();
+
+    let mut bytes = std::fs::read(&path).unwrap();
+    let nodes_entry = find_table_entry_offset(&bytes, SECTION_NODES);
+    // offset is the entry's third field (u64 at byte 8, after section_id
+    // and its padding).
+    let nodes_offset =
+        u64::from_le_bytes(bytes[nodes_entry + 8..nodes_entry + 16].try_into().unwrap());
+
+    let geometry_entry = find_table_entry_offset(&bytes, packs::SECTION_GEOMETRY);
+    // Moves GEOMETRY's offset to land inside NODES' range -- still 8-byte
+    // aligned (nodes_offset already is), still within the file (moved
+    // earlier, so its end can only shrink), but now overlapping.
+    let new_offset = nodes_offset + 8;
+    bytes[geometry_entry + 8..geometry_entry + 16].copy_from_slice(&new_offset.to_le_bytes());
+    std::fs::write(&path, &bytes).unwrap();
+
+    match Rpack::open(&path) {
+        Err(RpackError::OverlappingSections { .. }) => {}
+        Err(other) => panic!("expected OverlappingSections, got {other}"),
+        Ok(_) => panic!("expected OverlappingSections, got Ok"),
+    }
+}
+
+#[test]
+fn refuses_section_overlapping_the_header_or_table() {
+    let model = build_model(8);
+    let meta = build_meta();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("section_overlaps_header.rpack");
+    write_rpack(&model, &meta, &path).unwrap();
+
+    let mut bytes = std::fs::read(&path).unwrap();
+    let snap_grid_entry = find_table_entry_offset(&bytes, SECTION_SNAP_GRID);
+    // Rewrites SNAP_GRID's [offset, len_bytes) to [0, 8) -- entirely inside
+    // the fixed header (56 bytes), so it doesn't collide with any other
+    // section, only the header/table region itself.
+    bytes[snap_grid_entry + 8..snap_grid_entry + 16].copy_from_slice(&0u64.to_le_bytes());
+    bytes[snap_grid_entry + 16..snap_grid_entry + 24].copy_from_slice(&8u64.to_le_bytes());
+    std::fs::write(&path, &bytes).unwrap();
+
+    match Rpack::open(&path) {
+        Err(RpackError::SectionOverlapsHeader { .. }) => {}
+        Err(other) => panic!("expected SectionOverlapsHeader, got {other}"),
+        Ok(_) => panic!("expected SectionOverlapsHeader, got Ok"),
+    }
+}
+
+// --- M-04: verify_structure (opt-in O(n) index validation) --------------
+
+/// `EdgeHot`'s field byte offsets, mirroring `core/packs/src/format.rs`'s
+/// `#[repr(C)]` layout (36 bytes total): target(4)@0, length_m(4)@4,
+/// speed_kmh(4)@8, ascent_m(4)@12, descent_m(4)@16, road_class(1)+pad(3)@20,
+/// ch_middle_node(4)@24, geom_offset(4)@28, geom_count(4)@32.
+const EDGE_TARGET_OFFSET: usize = 0;
+const EDGE_GEOM_COUNT_OFFSET: usize = 32;
+
+#[test]
+fn verify_structure_accepts_an_untouched_pack() {
+    let model = build_model(9);
+    let meta = build_meta();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("valid.rpack");
+    write_rpack(&model, &meta, &path).unwrap();
+
+    let pack = Rpack::open(&path).unwrap();
+    pack.verify_structure()
+        .expect("a pack built from a validated model should pass verify_structure");
+}
+
+#[test]
+fn verify_structure_rejects_non_monotone_csr() {
+    let model = build_model(10);
+    let meta = build_meta();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("non_monotone_csr.rpack");
+    write_rpack(&model, &meta, &path).unwrap();
+
+    let mut bytes = std::fs::read(&path).unwrap();
+    let csr_offset = find_section_offset(&bytes, SECTION_CSR);
+    // csr_first_edge[1]: forced far above any later cumulative count.
+    let idx1 = csr_offset + std::mem::size_of::<u32>();
+    bytes[idx1..idx1 + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+    std::fs::write(&path, &bytes).unwrap();
+
+    let pack = Rpack::open(&path).expect("this invariant is O(n), not checked by open");
+    assert!(pack.verify_structure().is_err());
+}
+
+#[test]
+fn verify_structure_rejects_csr_not_ending_at_edge_count() {
+    let model = build_model(11);
+    let meta = build_meta();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("csr_wrong_last_entry.rpack");
+    write_rpack(&model, &meta, &path).unwrap();
+
+    let mut bytes = std::fs::read(&path).unwrap();
+    let csr_offset = find_section_offset(&bytes, SECTION_CSR);
+    let last_idx = csr_offset + N_NODES * std::mem::size_of::<u32>();
+    bytes[last_idx..last_idx + 4].copy_from_slice(&0u32.to_le_bytes());
+    std::fs::write(&path, &bytes).unwrap();
+
+    let pack = Rpack::open(&path).expect("this invariant is O(n), not checked by open");
+    assert!(pack.verify_structure().is_err());
+}
+
+#[test]
+fn verify_structure_rejects_out_of_range_edge_target() {
+    let model = build_model(12);
+    let meta = build_meta();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("bad_edge_target.rpack");
+    write_rpack(&model, &meta, &path).unwrap();
+
+    let mut bytes = std::fs::read(&path).unwrap();
+    let edges_offset = find_section_offset(&bytes, SECTION_EDGES_HOT);
+    let target_idx = edges_offset + EDGE_TARGET_OFFSET;
+    bytes[target_idx..target_idx + 4].copy_from_slice(&(N_NODES as u32).to_le_bytes());
+    std::fs::write(&path, &bytes).unwrap();
+
+    let pack = Rpack::open(&path).expect("this invariant is O(n), not checked by open");
+    assert!(pack.verify_structure().is_err());
+}
+
+#[test]
+fn verify_structure_rejects_out_of_range_reverse_edge_index() {
+    let model = build_model(13);
+    let meta = build_meta();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("bad_reverse_edge.rpack");
+    write_rpack(&model, &meta, &path).unwrap();
+
+    let mut bytes = std::fs::read(&path).unwrap();
+    let reverse_edges_offset = find_section_offset(&bytes, SECTION_REVERSE_EDGES);
+    bytes[reverse_edges_offset..reverse_edges_offset + 4]
+        .copy_from_slice(&(N_EDGES as u32).to_le_bytes());
+    std::fs::write(&path, &bytes).unwrap();
+
+    let pack = Rpack::open(&path).expect("this invariant is O(n), not checked by open");
+    assert!(pack.verify_structure().is_err());
+}
+
+#[test]
+fn verify_structure_rejects_out_of_range_ch_order() {
+    let model = build_model(14);
+    let meta = build_meta();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("bad_ch_order.rpack");
+    write_rpack(&model, &meta, &path).unwrap();
+
+    let mut bytes = std::fs::read(&path).unwrap();
+    let ch_order_offset = find_section_offset(&bytes, SECTION_CH_ORDER);
+    bytes[ch_order_offset..ch_order_offset + 4].copy_from_slice(&(N_NODES as u32).to_le_bytes());
+    std::fs::write(&path, &bytes).unwrap();
+
+    let pack = Rpack::open(&path).expect("this invariant is O(n), not checked by open");
+    assert!(pack.verify_structure().is_err());
+}
+
+#[test]
+fn verify_structure_rejects_geometry_range_out_of_bounds() {
+    let model = build_model(15);
+    let meta = build_meta();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("bad_geometry_range.rpack");
+    write_rpack(&model, &meta, &path).unwrap();
+
+    let mut bytes = std::fs::read(&path).unwrap();
+    let edges_offset = find_section_offset(&bytes, SECTION_EDGES_HOT);
+    let geom_count_idx = edges_offset + EDGE_GEOM_COUNT_OFFSET;
+    bytes[geom_count_idx..geom_count_idx + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+    std::fs::write(&path, &bytes).unwrap();
+
+    let pack = Rpack::open(&path).expect("this invariant is O(n), not checked by open");
+    assert!(pack.verify_structure().is_err());
 }

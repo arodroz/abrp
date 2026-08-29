@@ -13,6 +13,13 @@ use crate::format::{
     SECTION_GEOMETRY, SECTION_NODES, SECTION_REVERSE_CSR, SECTION_REVERSE_EDGES, SECTION_SNAP_GRID,
 };
 
+/// Whether `[a_offset, a_offset + a_len)` and `[b_offset, b_offset + b_len)`
+/// intersect. A zero-length range never overlaps anything at its own
+/// boundary, only strictly inside another range.
+fn ranges_overlap(a_offset: u64, a_len: u64, b_offset: u64, b_len: u64) -> bool {
+    a_offset < b_offset + b_len && b_offset < a_offset + a_len
+}
+
 struct SectionMeta {
     id: u32,
     offset: u64,
@@ -109,6 +116,36 @@ impl Rpack {
                 len_bytes: entry.len_bytes,
                 crc32: entry.crc32,
             });
+        }
+
+        // Reject duplicate section ids and sections overlapping each other
+        // or the header/section table (M-04). O(section_count^2), which is
+        // cheap since a pack has a handful of sections, not O(nodes) or
+        // O(edges) -- this must never page in an index array.
+        for i in 0..sections.len() {
+            for j in (i + 1)..sections.len() {
+                if sections[i].id == sections[j].id {
+                    return Err(RpackError::DuplicateSection {
+                        section_id: sections[i].id,
+                    });
+                }
+                if ranges_overlap(
+                    sections[i].offset,
+                    sections[i].len_bytes,
+                    sections[j].offset,
+                    sections[j].len_bytes,
+                ) {
+                    return Err(RpackError::OverlappingSections {
+                        section_id_a: sections[i].id,
+                        section_id_b: sections[j].id,
+                    });
+                }
+            }
+        }
+        for s in &sections {
+            if ranges_overlap(s.offset, s.len_bytes, 0, table_end) {
+                return Err(RpackError::SectionOverlapsHeader { section_id: s.id });
+            }
         }
 
         for &(id, elem_size) in FIXED_ELEMENT_SECTIONS {
@@ -303,6 +340,79 @@ impl Rpack {
                 });
             }
         }
+        Ok(())
+    }
+
+    /// Deep, opt-in validation of every cross-section index invariant the
+    /// CH search and geometry lookups rely on: the forward and reverse CSR
+    /// row indices are monotonically nondecreasing and end at the edge
+    /// count, every edge's target is a valid node id, every baked
+    /// reverse-adjacency entry is a valid edge id, every CH order value is
+    /// a valid node id, and every edge's geometry range stays inside the
+    /// geometry section.
+    ///
+    /// This is `O(nodes + edges)`, unlike `open`'s O(section-count)
+    /// structural checks, so it is never run automatically. Use it for
+    /// repair/QA paths on a sideloaded or otherwise untrusted file --
+    /// `open` guarantees a well-formed file layout, `verify_checksums`
+    /// (run at install time) guarantees content wasn't corrupted in
+    /// transit, and `verify_structure` is the deep check beyond either of
+    /// those for when you need it.
+    pub fn verify_structure(&self) -> Result<(), RpackError> {
+        let n_nodes = self.node_count() as u64;
+        let n_edges = self.edges().len() as u64;
+        let n_geom = self.geometry().len() as u64;
+
+        let check_csr = |name: &str, csr: &[u32]| -> Result<(), RpackError> {
+            for w in csr.windows(2) {
+                if w[1] < w[0] {
+                    return Err(RpackError::Validation(format!(
+                        "{name} is not monotonically nondecreasing"
+                    )));
+                }
+            }
+            match csr.last() {
+                Some(&last) if last as u64 == n_edges => Ok(()),
+                _ => Err(RpackError::Validation(format!(
+                    "{name}'s last entry does not match the edge count {n_edges}"
+                ))),
+            }
+        };
+        check_csr("csr_first_edge", self.csr_first_edge())?;
+        check_csr("reverse_csr", self.reverse_csr())?;
+
+        for (i, e) in self.edges().iter().enumerate() {
+            if e.target as u64 >= n_nodes {
+                return Err(RpackError::Validation(format!(
+                    "edge {i} targets out-of-range node {}",
+                    e.target
+                )));
+            }
+            let geom_end = e.geom_offset as u64 + e.geom_count as u64;
+            if geom_end > n_geom {
+                return Err(RpackError::Validation(format!(
+                    "edge {i} geometry range [{}, {geom_end}) exceeds geometry section of {n_geom}",
+                    e.geom_offset
+                )));
+            }
+        }
+
+        for (i, &edge_id) in self.reverse_edge_ids().iter().enumerate() {
+            if edge_id as u64 >= n_edges {
+                return Err(RpackError::Validation(format!(
+                    "reverse edge index {i} references out-of-range edge {edge_id}"
+                )));
+            }
+        }
+
+        for (i, &rank) in self.ch_order().iter().enumerate() {
+            if rank as u64 >= n_nodes {
+                return Err(RpackError::Validation(format!(
+                    "ch_order entry {i} has out-of-range value {rank}"
+                )));
+            }
+        }
+
         Ok(())
     }
 

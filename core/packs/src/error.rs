@@ -28,6 +28,19 @@ pub enum RpackError {
     MissingSection {
         section_id: u32,
     },
+    /// Two section-table entries share the same `section_id`.
+    DuplicateSection {
+        section_id: u32,
+    },
+    /// Two sections' `[offset, offset + len_bytes)` ranges overlap.
+    OverlappingSections {
+        section_id_a: u32,
+        section_id_b: u32,
+    },
+    /// A section's range overlaps the fixed header or the section table.
+    SectionOverlapsHeader {
+        section_id: u32,
+    },
     ChecksumMismatch {
         section_id: u32,
     },
@@ -63,6 +76,21 @@ impl fmt::Display for RpackError {
             }
             RpackError::MissingSection { section_id } => {
                 write!(f, "missing required section {section_id}")
+            }
+            RpackError::DuplicateSection { section_id } => {
+                write!(f, "duplicate section id {section_id}")
+            }
+            RpackError::OverlappingSections {
+                section_id_a,
+                section_id_b,
+            } => {
+                write!(f, "section {section_id_a} overlaps section {section_id_b}")
+            }
+            RpackError::SectionOverlapsHeader { section_id } => {
+                write!(
+                    f,
+                    "section {section_id} overlaps the header or section table"
+                )
             }
             RpackError::ChecksumMismatch { section_id } => {
                 write!(f, "checksum mismatch in section {section_id}")

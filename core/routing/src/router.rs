@@ -207,8 +207,7 @@ impl<'a> Router<'a> {
         in_edges.iter().any(|&idx| {
             let u = self.from_of_edge[idx as usize];
             ch_order[u as usize] > ch_order[v as usize]
-                && labels_f.dist(u) + edge_cost(&self.pack.edges()[idx as usize])
-                    < labels_f.dist(v)
+                && labels_f.dist(u) + edge_cost(&self.pack.edges()[idx as usize]) < labels_f.dist(v)
         })
     }
 
