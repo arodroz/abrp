@@ -60,6 +60,10 @@ _Avoid_: Efficiency, Wh/km setting, consumption factor
 A downloadable set of Chargers covering one region, built from open national datasets and installed on the phone so the planner can choose Charging Stops without connectivity. Refreshed independently of the Region Pack.
 _Avoid_: Charger database, POI file, station list
 
+**Catalog**:
+The hosted list of curated regions available to install, naming for each region the current version of its Region, Map and Charger Packs. The app reads it to offer installs and to detect that a refresh exists; installing a region means fetching the Packs the Catalog names for it.
+_Avoid_: Manifest, region list, pack index, store
+
 **SoC Curve**:
 The predicted SoC along a Plan as a function of distance, sampled finely enough to chart, together with elevation and energy per km at each sample. The SoC/elevation chart is its rendering.
 _Avoid_: Battery graph, consumption chart, path points
