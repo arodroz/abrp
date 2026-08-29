@@ -1,0 +1,4 @@
+# Pinned so local builds and CI resolve the same toolchain (codebase audit L-03).
+# Bump deliberately; bootstrap-mac.sh and CI both follow this file via rustup.
+[toolchain]
+channel = "1.98.0"

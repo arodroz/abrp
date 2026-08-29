@@ -6,3 +6,9 @@ app/PlannerKit/.build/
 app/Wayfinder/Wayfinder.xcodeproj/
 app/Wayfinder/DerivedData/
 app/Wayfinder/Info.plist
+# Prototype build artifacts left in the working tree by prototype/* branch checkouts
+# (sources live on those branches; only artifacts are ignored -- codebase audit L-04)
+prototype/ios/DerivedData-sim/
+prototype/ios/SliceProto.xcodeproj/
+prototype/slice/target/
+prototype/ios/.spm/
