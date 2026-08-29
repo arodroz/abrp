@@ -918,16 +918,96 @@ enum Autotest {
 
     // MARK: triplog-smoke
 
-    /// Drives TripLogStore's capture lifecycle directly. Proves: the start/end SoC prompts and
-    /// their phase transitions, the cancel-end-SoC data-loss guard (cancelling resumes
-    /// recording rather than truncating the trace), and that the saved tlog-1 JSON matches the
-    /// schema on the fields #52's Rust `calibrate()` will parse -- including a byte-level
-    /// spot-check that the on-disk keys are really snake_case, independent of the Swift model.
+    /// M-06 (docs/codebase-audit-2026-08-29.md): exercises TripLogStore.ingest's producer
+    /// contract on a disposable probe store -- out-of-order timestamps, exact-duplicate
+    /// timestamps, invalid (0, 0) coordinates, and sub-0.5s thinning are all dropped, while a
+    /// valid fix spaced >= 0.5s past the last kept one is still kept.
+    @MainActor
+    private static func runIngestContractChecks() -> Bool {
+        var ok = true
+        let probeStore = TripLogStore()
+        probeStore.authorizationStatus = { .authorizedAlways }
+        probeStore.startTapped()
+        probeStore.confirmStartSoc(50)
+        guard let probeStart = probeStore.tripStartDate else {
+            report("ingest-contract-probe-start", false)
+            return false
+        }
+
+        func probeFix(t: Double, lat: Double = 49.6116, lon: Double = 6.1319) -> CLLocation {
+            CLLocation(
+                coordinate: CLLocationCoordinate2D(latitude: lat, longitude: lon),
+                altitude: 300, horizontalAccuracy: 5, verticalAccuracy: 5,
+                course: 0, speed: 10, timestamp: probeStart.addingTimeInterval(t)
+            )
+        }
+
+        probeStore.ingest(probeFix(t: 0)) // kept: first sample
+        probeStore.ingest(probeFix(t: 1.0)) // kept: 1.0s after the last kept sample
+        let baseline = probeStore.sampleCount
+        let baselineOk = baseline == 2
+        report("ingest-baseline", baselineOk, "count=\(baseline)")
+        ok = ok && baselineOk
+
+        probeStore.ingest(probeFix(t: 0.6)) // out-of-order: before the last kept sample's t=1.0
+        let outOfOrderDropped = probeStore.sampleCount == baseline
+        report("ingest-out-of-order-dropped", outOfOrderDropped, "count=\(probeStore.sampleCount)")
+        ok = ok && outOfOrderDropped
+
+        probeStore.ingest(probeFix(t: 1.0)) // duplicate: exactly the last kept sample's t
+        let duplicateDropped = probeStore.sampleCount == baseline
+        report("ingest-duplicate-timestamp-dropped", duplicateDropped, "count=\(probeStore.sampleCount)")
+        ok = ok && duplicateDropped
+
+        probeStore.ingest(probeFix(t: 1.6, lat: 0, lon: 0)) // invalid: exact (0, 0)
+        let invalidCoordDropped = probeStore.sampleCount == baseline
+        report("ingest-invalid-coordinate-dropped", invalidCoordDropped, "count=\(probeStore.sampleCount)")
+        ok = ok && invalidCoordDropped
+
+        probeStore.ingest(probeFix(t: 1.2)) // thinned: only 0.2s after the last kept sample
+        let thinnedDropped = probeStore.sampleCount == baseline
+        report("ingest-sub-half-second-thinned", thinnedDropped, "count=\(probeStore.sampleCount)")
+        ok = ok && thinnedDropped
+
+        probeStore.ingest(probeFix(t: 1.6)) // kept: 0.6s after the last kept sample
+        let keptAfterWindow = probeStore.sampleCount == baseline + 1
+        report("ingest-valid-fix-kept", keptAfterWindow, "count=\(probeStore.sampleCount)")
+        ok = ok && keptAfterWindow
+
+        return ok
+    }
+
+    /// Drives TripLogStore's capture lifecycle directly. Proves: denied authorization refuses
+    /// to start recording (M-06 -- docs/codebase-audit-2026-08-29.md), the ingest producer
+    /// contract (out-of-order/duplicate timestamps, invalid coordinates, sub-1Hz thinning), the
+    /// start/end SoC prompts and their phase transitions, the cancel-end-SoC data-loss guard
+    /// (cancelling resumes recording rather than truncating the trace), and that the saved
+    /// tlog-1 JSON matches the schema on the fields #52's Rust `calibrate()` will parse --
+    /// including a byte-level spot-check that the on-disk keys are really snake_case,
+    /// independent of the Swift model.
     @MainActor
     private static func runTriplogSmoke(tripStore: TripLogStore) async {
         var ok = true
 
+        // -- M-06: denied authorization refuses to start recording.
+        tripStore.authorizationStatus = { .denied }
+        tripStore.startTapped()
+        tripStore.confirmStartSoc(90)
+        let deniedRefused = tripStore.phase == .idle && tripStore.captureErrorMessage != nil
+        report(
+            "denied-start-refused", deniedRefused,
+            "phase=\(tripStore.phase) captureErrorMessage=\(tripStore.captureErrorMessage ?? "none")"
+        )
+        ok = ok && deniedRefused
+
+        // -- M-06: ingest producer-contract checks, on an isolated probe store so they don't
+        // perturb the 125-sample golden flow below (a real trip's own tripStartDate/samples).
+        ok = runIngestContractChecks() && ok
+
         tripStore.fetchTemperature = { _, _, _ in 14.5 }
+        // Deterministic regardless of the simulator's actual location-permission state --
+        // `deniedRefused` above already proved the denial path via the injectable closure.
+        tripStore.authorizationStatus = { .authorizedAlways }
 
         tripStore.startTapped()
         let promptingStart = tripStore.phase == .promptingStartSoc

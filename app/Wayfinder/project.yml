@@ -36,7 +36,8 @@ targets:
         DEVELOPMENT_TEAM: 2V28CD5VJY
         CODE_SIGN_STYLE: Automatic
         TARGETED_DEVICE_FAMILY: "1"
-        SWIFT_VERSION: "5.0"
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
         MARKETING_VERSION: "1.0"
         CURRENT_PROJECT_VERSION: "1"
     dependencies:

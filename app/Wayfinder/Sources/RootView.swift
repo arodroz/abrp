@@ -21,6 +21,84 @@ struct RootView: View {
     @State private var socInputText = ""
 
     var body: some View {
+        // Split into two statements -- the compiler couldn't type-check the
+        // onAppear/onChange/sheet/alert modifiers as a single chained expression in
+        // reasonable time once M-06's extra onChange calls (docs/codebase-audit-2026-08-29.md)
+        // pushed it over Swift 6's inference budget.
+        let withLifecycleHandlers = mapSurface
+            .onAppear {
+                store.updateAppearance(systemDark: colorScheme == .dark)
+                store.load()
+                store.requestLocationPermission()
+            }
+            .onChange(of: colorScheme) { _, newValue in
+                store.updateAppearance(systemDark: newValue == .dark)
+            }
+            .onChange(of: store.planVersion) { _, _ in
+                if let plan = store.plan {
+                    RouteLayer.fitToRoute(mapView: store.mapView, plan: plan)
+                }
+            }
+            .onChange(of: store.planErrorVersion) { _, _ in
+                if let message = store.planErrorMessage { showToast(message) }
+            }
+            .onChange(of: tripStore.captureErrorVersion) { _, _ in
+                if let message = tripStore.captureErrorMessage { showToast(message) }
+            }
+            .onChange(of: tripStore.saveErrorVersion) { _, _ in
+                if let message = tripStore.saveErrorMessage { showToast(message) }
+            }
+            .onChange(of: tripStore.lastSavedURL) { _, newValue in
+                if newValue != nil { showToast("Trip Log saved") }
+            }
+        return withLifecycleHandlers
+            .sheet(isPresented: Binding(get: { store.showingSettings }, set: { store.showingSettings = $0 })) {
+                SettingsForm(store: store, installer: installer, tripStore: tripStore)
+                    .presentationDetents([.medium, .large])
+            }
+            .alert(
+                "Trip start SoC",
+                isPresented: Binding(
+                    get: { tripStore.phase == .promptingStartSoc },
+                    set: { if !$0 { tripStore.cancelStartSoc() } }
+                )
+            ) {
+                TextField("SoC %", text: $socInputText).keyboardType(.numberPad)
+                Button("OK") {
+                    if let pct = Int(socInputText) { tripStore.confirmStartSoc(pct) }
+                    socInputText = ""
+                }
+                .disabled(Int(socInputText) == nil)
+                Button("Cancel", role: .cancel) {
+                    tripStore.cancelStartSoc()
+                    socInputText = ""
+                }
+            } message: {
+                Text("Enter the dash state of charge, as a whole percent.")
+            }
+            .alert(
+                "Trip end SoC",
+                isPresented: Binding(
+                    get: { tripStore.phase == .promptingEndSoc },
+                    set: { if !$0 { tripStore.cancelEndSoc() } }
+                )
+            ) {
+                TextField("SoC %", text: $socInputText).keyboardType(.numberPad)
+                Button("OK") {
+                    if let pct = Int(socInputText) { tripStore.confirmEndSoc(pct) }
+                    socInputText = ""
+                }
+                .disabled(Int(socInputText) == nil)
+                Button("Cancel", role: .cancel) {
+                    tripStore.cancelEndSoc()
+                    socInputText = ""
+                }
+            } message: {
+                Text("Enter the dash state of charge, as a whole percent.")
+            }
+    }
+
+    private var mapSurface: some View {
         ZStack(alignment: .top) {
             PlannerMapView(
                 store: store,
@@ -78,66 +156,6 @@ struct RootView: View {
                     ResultCard(store: store)
                 }
             }
-        }
-        .onAppear {
-            store.updateAppearance(systemDark: colorScheme == .dark)
-            store.load()
-            store.requestLocationPermission()
-        }
-        .onChange(of: colorScheme) { _, newValue in
-            store.updateAppearance(systemDark: newValue == .dark)
-        }
-        .onChange(of: store.planVersion) { _, _ in
-            if let plan = store.plan {
-                RouteLayer.fitToRoute(mapView: store.mapView, plan: plan)
-            }
-        }
-        .onChange(of: store.planErrorVersion) { _, _ in
-            if let message = store.planErrorMessage { showToast(message) }
-        }
-        .sheet(isPresented: Binding(get: { store.showingSettings }, set: { store.showingSettings = $0 })) {
-            SettingsForm(store: store, installer: installer, tripStore: tripStore)
-                .presentationDetents([.medium, .large])
-        }
-        .alert(
-            "Trip start SoC",
-            isPresented: Binding(
-                get: { tripStore.phase == .promptingStartSoc },
-                set: { if !$0 { tripStore.cancelStartSoc() } }
-            )
-        ) {
-            TextField("SoC %", text: $socInputText).keyboardType(.numberPad)
-            Button("OK") {
-                if let pct = Int(socInputText) { tripStore.confirmStartSoc(pct) }
-                socInputText = ""
-            }
-            .disabled(Int(socInputText) == nil)
-            Button("Cancel", role: .cancel) {
-                tripStore.cancelStartSoc()
-                socInputText = ""
-            }
-        } message: {
-            Text("Enter the dash state of charge, as a whole percent.")
-        }
-        .alert(
-            "Trip end SoC",
-            isPresented: Binding(
-                get: { tripStore.phase == .promptingEndSoc },
-                set: { if !$0 { tripStore.cancelEndSoc() } }
-            )
-        ) {
-            TextField("SoC %", text: $socInputText).keyboardType(.numberPad)
-            Button("OK") {
-                if let pct = Int(socInputText) { tripStore.confirmEndSoc(pct) }
-                socInputText = ""
-            }
-            .disabled(Int(socInputText) == nil)
-            Button("Cancel", role: .cancel) {
-                tripStore.cancelEndSoc()
-                socInputText = ""
-            }
-        } message: {
-            Text("Enter the dash state of charge, as a whole percent.")
         }
     }
 

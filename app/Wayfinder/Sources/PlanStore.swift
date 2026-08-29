@@ -29,9 +29,15 @@ struct EditorWaypoint: Identifiable, Equatable {
     }
 }
 
+// Swift 6 strict concurrency (wayfinder #47/#51 audit remediation, M-05 --
+// docs/codebase-audit-2026-08-29.md): both delegate protocols declare nonisolated requirements,
+// but this class is @MainActor. `@preconcurrency` conformance is sound here because delivery is
+// genuinely on the main thread for both: MLNMapView calls its delegate on main, and
+// CLLocationManager delivers callbacks on the runloop of the thread that started it -- main,
+// since `locationManager` is a stored property initialized from this @MainActor class's `init`.
 @MainActor
 @Observable
-final class PlanStore: NSObject, MLNMapViewDelegate, CLLocationManagerDelegate {
+final class PlanStore: NSObject, @preconcurrency MLNMapViewDelegate, @preconcurrency CLLocationManagerDelegate {
     enum PackStatus: Equatable {
         case missing
         case loaded(region: String)

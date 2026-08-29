@@ -673,7 +673,11 @@ final class PackInstaller: NSObject {
     }
 }
 
-extension PackInstaller: URLSessionDownloadDelegate {
+// Swift 6 strict concurrency (M-05 -- docs/codebase-audit-2026-08-29.md): `@preconcurrency`
+// conformance is sound for every method below, including `didFinishDownloadingTo`, because the
+// session was created with `delegateQueue: .main` -- every callback on it, not just this one,
+// is genuinely delivered on the main thread.
+extension PackInstaller: @preconcurrency URLSessionDownloadDelegate {
     /// `location` is a temp file deleted as soon as this method returns, so the move to the
     /// resolved destination must happen synchronously here, on the main queue (the session was
     /// created with `delegateQueue: .main`) -- matching every other MLNMapViewDelegate/

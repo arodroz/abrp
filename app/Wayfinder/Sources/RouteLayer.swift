@@ -9,6 +9,10 @@ import MapLibre
 import PlannerKit
 import UIKit
 
+// @MainActor: every function here takes an MLNStyle/MLNMapView, which are main-actor-bound;
+// isolating the whole namespace makes that explicit under Swift 6 strict concurrency (M-05)
+// instead of leaving nonisolated statics that only happen to be called from the main actor.
+@MainActor
 enum RouteLayer {
     private static let routeSourceId = "route"
     private static let stopsSourceId = "stops"

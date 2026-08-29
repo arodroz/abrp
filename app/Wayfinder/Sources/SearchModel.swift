@@ -4,11 +4,10 @@ import CoreLocation
 import Foundation
 import MapKit
 
-/// Biases MKLocalSearchCompleter's suggestions per the corridor pack's actual coverage --
-/// derived from RegionBounds.swift's shared table (wayfinder #47) rather than a second
-/// hardcoded copy of the same box.
-let corridorRegion: MKCoordinateRegion = {
-    let box = RegionBounds.box(for: "corridor")
+/// Converts a region's RegionBounds.Box (wayfinder #47) into an MKCoordinateRegion for
+/// MKLocalSearchCompleter's `region` bias.
+private func mkRegion(for region: String) -> MKCoordinateRegion {
+    let box = RegionBounds.box(for: region)
     return MKCoordinateRegion(
         center: CLLocationCoordinate2D(
             latitude: (box.latRange.lowerBound + box.latRange.upperBound) / 2,
@@ -17,25 +16,52 @@ let corridorRegion: MKCoordinateRegion = {
             latitudeDelta: box.latRange.upperBound - box.latRange.lowerBound,
             longitudeDelta: box.lonRange.upperBound - box.lonRange.lowerBound)
     )
-}()
+}
 
 /// Wraps MKLocalSearchCompleter for live suggestions as the user types. NSObject/
 /// MKLocalSearchCompleterDelegate conformance needs `ObservableObject`, not `@Observable`.
+///
+/// M-07 (docs/codebase-audit-2026-08-29.md): the completer used to be pinned to the corridor
+/// pack's bounds regardless of the active region. It's now constructed with, and kept in sync
+/// with, PlanStore's `activeRegion` -- see RouteEditorView's init and
+/// onChange(of: store.activeRegion).
+///
+/// Swift 6 strict concurrency (M-05 -- docs/codebase-audit-2026-08-29.md): MapKit doesn't
+/// publish concurrency annotations for this delegate, so the compiler can't verify its callback
+/// thread the way it can CLLocationManager's/MLNMapView's. `@preconcurrency` conformance is
+/// still sound in practice, not just convenient: `completer.queryFragment` is set only from
+/// this @MainActor class in response to UI typing, and Apple's own DTS guidance for this exact
+/// Swift 6 migration (developer.apple.com/forums/thread/761518) has developers call
+/// `MainActor.assumeIsolated` from inside this callback -- which traps if the assumption is
+/// wrong -- confirming delivery is genuinely on the main thread.
 @MainActor
-final class DestinationSearchModel: NSObject, ObservableObject, MKLocalSearchCompleterDelegate {
+final class DestinationSearchModel: NSObject, ObservableObject, @preconcurrency MKLocalSearchCompleterDelegate {
     @Published var query: String = "" {
         didSet { completer.queryFragment = query }
     }
     @Published var results: [MKLocalSearchCompletion] = []
+    /// The region the completer is currently biased to -- exposed so the wiring can be checked
+    /// directly (e.g. in the debugger or a log) since MKLocalSearchCompleter is network-backed
+    /// and has no autotest coverage.
+    private(set) var biasedRegion: String
 
     private let completer: MKLocalSearchCompleter
 
-    override init() {
+    init(region: String) {
+        biasedRegion = region
         completer = MKLocalSearchCompleter()
         super.init()
         completer.resultTypes = [.address, .pointOfInterest]
-        completer.region = corridorRegion
+        completer.region = mkRegion(for: region)
         completer.delegate = self
+    }
+
+    /// Called from RouteEditorView.onChange(of: store.activeRegion). A no-op guard avoids
+    /// resetting the completer's in-flight region on every unrelated view update.
+    func updateRegion(_ region: String) {
+        guard region != biasedRegion else { return }
+        biasedRegion = region
+        completer.region = mkRegion(for: region)
     }
 
     func completerDidUpdateResults(_ completer: MKLocalSearchCompleter) {

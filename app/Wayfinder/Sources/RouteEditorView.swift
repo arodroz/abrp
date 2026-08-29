@@ -13,12 +13,21 @@ struct RouteEditorView: View {
     /// -- plan errors are reported by RootView itself via onChange(planErrorVersion)).
     var onToast: (String) -> Void
 
-    @StateObject private var searchModel = DestinationSearchModel()
+    @StateObject private var searchModel: DestinationSearchModel
     @FocusState private var searchFocused: Bool
     @State private var searchExpanded = false
     @State private var cardExpanded = true
     @State private var searchMode: SearchMode = .destination
     @AppStorage("recentDestinations") private var recentsRaw: String = "[]"
+
+    /// M-07 (docs/codebase-audit-2026-08-29.md): seeds the search completer's bias from the
+    /// store's active region at construction time, rather than a hardcoded corridor box --
+    /// `onChange(of: store.activeRegion)` in `body` keeps it in sync afterwards.
+    init(store: PlanStore, onToast: @escaping (String) -> Void) {
+        self.store = store
+        self.onToast = onToast
+        _searchModel = StateObject(wrappedValue: DestinationSearchModel(region: store.activeRegion))
+    }
 
     /// Whether a selected search result sets the destination or appends a Waypoint --
     /// entered by tapping the pill (destination) or the card's "+ Add stop" row (addStop).
@@ -40,6 +49,9 @@ struct RouteEditorView: View {
             } else if store.destination != nil {
                 routeEditorCard
             }
+        }
+        .onChange(of: store.activeRegion) { _, newRegion in
+            searchModel.updateRegion(newRegion)
         }
     }
 
