@@ -9,7 +9,9 @@
 // PackInstaller's rows with Install/Update/Use/Delete actions. The Trip Logs section
 // (wayfinder #51) lists saved Trip Logs against TripLogStore.logs, each row share-sheet
 // exportable (ADR 0009 point 5) with the same Delete-button + confirmationDialog pattern as
-// the Packs section's rows.
+// the Packs section's rows. The Calibration section (wayfinder #53), shown once Trip Logs
+// exist, renders PlanStore.calibrationResult's fit quality, a per-trip caption on each Trip
+// Logs row, and the accept/dismiss proposal row for PlanStore's refit-and-accept flow.
 import Foundation
 import PlannerKit
 import SwiftUI
@@ -41,10 +43,24 @@ struct SettingsForm: View {
                         if let url = pendingDeleteTripLogURL {
                             try? TripLogStorage.delete(url: url)
                             tripStore.refreshLogs()
+                            store.refreshCalibration(logURLs: tripStore.logs)
                         }
                         pendingDeleteTripLogURL = nil
                     }
                     Button("Cancel", role: .cancel) { pendingDeleteTripLogURL = nil }
+                }
+
+                if !tripStore.logs.isEmpty {
+                    Section("Calibration") {
+                        calibrationStatusRows
+                        if !store.calibrationDismissed, let result = store.calibrationResult,
+                           abs(result.referenceConsumptionWhPerKm - currentEffectiveReferenceConsumptionWhPerKm) >= 1.0 {
+                            calibrationProposalRow(result)
+                        }
+                        if let calibrationErrorMessage = store.calibrationErrorMessage {
+                            Text(calibrationErrorMessage).font(.caption).foregroundStyle(.red)
+                        }
+                    }
                 }
 
                 Section("Packs") {
@@ -139,7 +155,10 @@ struct SettingsForm: View {
                     Button("Done") { dismiss() }
                 }
             }
-            .onAppear { tripStore.refreshLogs() }
+            .onAppear {
+                tripStore.refreshLogs()
+                store.refreshCalibration(logURLs: tripStore.logs)
+            }
         }
     }
 
@@ -163,6 +182,9 @@ struct SettingsForm: View {
                 Text(Self.epochDateFormatter.string(from: Date(timeIntervalSince1970: TimeInterval(log.startUnix))))
                 Text("\(tripLogDurationText(log)) \u{00B7} SoC \(log.startSocPct)% \u{2192} \(log.endSocPct)% \u{00B7} \(log.samples.count) samples")
                     .font(.caption).foregroundStyle(.secondary)
+                if let calibrationCaption = calibrationCaption(for: log) {
+                    Text(calibrationCaption).font(.caption).foregroundStyle(.secondary)
+                }
             }
             Spacer()
             ShareLink(item: url) {
@@ -177,6 +199,75 @@ struct SettingsForm: View {
         let minutes = (log.endUnix - log.startUnix) / 60
         guard minutes >= 60 else { return "\(minutes) min" }
         return "\(minutes / 60)h \(minutes % 60)m"
+    }
+
+    // MARK: Calibration section (wayfinder #53)
+
+    /// Second caption line for a Trip Log row once a calibration result exists: why an
+    /// excluded trip didn't count, or the fit quality for one that did.
+    private func calibrationCaption(for log: TripLog) -> String? {
+        guard let fit = store.calibrationResult?.trips.first(where: { $0.id == log.id }) else { return nil }
+        if let excludedReason = fit.excludedReason {
+            return "Not used: \(excludedReason)"
+        }
+        if fit.used, fit.qualifying, let errorPoints = fit.errorPoints {
+            return String(format: "ratio %.2f \u{00B7} error %.1f pts", fit.ratio, errorPoints)
+        }
+        if fit.used, fit.qualifying {
+            return String(format: "ratio %.2f", fit.ratio)
+        }
+        if fit.used {
+            return String(format: "ratio %.2f \u{00B7} under 100 km", fit.ratio)
+        }
+        return nil
+    }
+
+    @ViewBuilder
+    private var calibrationStatusRows: some View {
+        if let result = store.calibrationResult {
+            let usableCount = result.trips.filter(\.used).count
+            // The Rust fit only ever weighs the last-10 qualifying trips (ADR 0009 point 4);
+            // this counts every qualifying trip in the set, not just the ones inside that window.
+            let qualifyingCount = result.trips.filter(\.qualifying).count
+            VStack(alignment: .leading, spacing: 4) {
+                Text("\(usableCount) of \(result.trips.count) trips usable")
+                if let maxErrorPoints = result.maxErrorPoints, let maePoints = result.maePoints {
+                    Text(String(
+                        format: "max error %.1f pts \u{00B7} avg %.1f pts over %d qualifying trips",
+                        maxErrorPoints, maePoints, qualifyingCount
+                    ))
+                    .font(.caption).foregroundStyle(.secondary)
+                }
+                if result.accepted {
+                    Label("Calibrated", systemImage: "checkmark.circle").font(.caption).foregroundStyle(.secondary)
+                } else {
+                    Text("Not yet calibrated").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        } else if store.calibrationErrorMessage == nil {
+            Text(store.plannerStatus == .ready ? "Checking calibration\u{2026}" : "Planner not ready")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder
+    private func calibrationProposalRow(_ result: FfiCalibrationResult) -> some View {
+        HStack {
+            Text(
+                "Reference Consumption: \(Int(currentEffectiveReferenceConsumptionWhPerKm)) "
+                    + "\u{2192} \(Int(result.referenceConsumptionWhPerKm)) Wh/km"
+            )
+            Spacer()
+            Button("Apply") { store.acceptCalibration() }
+            Button("Dismiss") { store.dismissCalibration() }
+        }
+        .buttonStyle(.borderless)
+    }
+
+    /// `store.referenceConsumptionWhPerKm ?? defaultReferenceConsumptionWhPerKm` -- the value
+    /// the proposal row's "current" side and its >= 1.0 Wh/km threshold compare against.
+    private var currentEffectiveReferenceConsumptionWhPerKm: Double {
+        store.referenceConsumptionWhPerKm ?? Self.defaultReferenceConsumptionWhPerKm
     }
 
     /// The picker binds through the ported `StopsBias` enum; the store keeps the raw Double

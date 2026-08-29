@@ -29,6 +29,14 @@
 // lifecycle directly -- there's no location-fix injection on the sim, so
 // synthetic CLLocations are fed straight to `ingest` -- and verifies the
 // saved tlog-1 JSON against the schema #52's Rust `calibrate()` will parse.
+// `--autotest calibrate-smoke` (wayfinder #53) drives PlanStore's
+// refit-and-accept flow directly: synthesizes a qualifying ~130km trip and a
+// non-qualifying ~3km trip straight via TripLogStorage.save (capture itself
+// is triplog-smoke's job), then proves refreshCalibration's empty-set,
+// result, accept (reference override set + persisted + replanned,
+// calibrationDismissed set), dismiss-sticky, and dismiss-resets-on-log-change
+// paths, plus that a corrupt log file fails the whole call loudly
+// (PlannerError.InvalidRequest) instead of being silently skipped.
 import CoreLocation
 import CryptoKit
 import Darwin
@@ -75,6 +83,10 @@ enum Autotest {
         case "triplog-smoke":
             Task.detached(priority: .userInitiated) {
                 await runTriplogSmoke(tripStore: tripStore)
+            }
+        case "calibrate-smoke":
+            Task.detached(priority: .userInitiated) {
+                await runCalibrateSmoke(store: store, tripStore: tripStore)
             }
         default:
             break
@@ -1130,6 +1142,182 @@ enum Autotest {
         let deletedOk = tripStore.logs.isEmpty && !FileManager.default.fileExists(atPath: url.path)
         report("logs-empty-after-delete", deletedOk, "count=\(tripStore.logs.count)")
         ok = ok && deletedOk
+
+        await finish(ok: ok)
+    }
+
+    // MARK: calibrate-smoke
+
+    /// Drives PlanStore's refit-and-accept flow (wayfinder #53) directly -- no UI-event
+    /// injection exists on the sim, so the two Trip Logs are synthesized straight via
+    /// `TripLogStorage.save` rather than captured (that path is triplog-smoke's job). Proves:
+    /// the empty-log-set no-op, a computed result whose trip rows and refit land in the
+    /// expected bands, `acceptCalibration()` setting + persisting + replanning the reference
+    /// override and marking the proposal dismissed, that the dismissal sticks across a
+    /// same-log-set refresh but resets on a genuine log-set change, and that a corrupt log file
+    /// fails the whole call loudly instead of being silently skipped.
+    @MainActor
+    private static func runCalibrateSmoke(store: PlanStore, tripStore: TripLogStore) async {
+        store.setOrigin(CLLocationCoordinate2D(latitude: 49.6116, longitude: 6.1319))
+        store.load()
+
+        let ready = await waitWithTimeout(seconds: 30) { store.plannerStatus == .ready }
+        report("planner-ready", ready)
+        guard ready else { await finish(ok: false, sleepSeconds: 8) }
+
+        var ok = true
+
+        // Clean slate: no logs, no persisted override.
+        TripLogStorage.list().forEach { try? TripLogStorage.delete(url: $0) }
+        UserDefaults.standard.removeObject(forKey: "referenceConsumptionWhPerKm")
+        store.referenceConsumptionWhPerKm = nil
+
+        // Empty-set: refreshCalibration over no logs clears (and doesn't compute) anything.
+        store.refreshCalibration(logURLs: [])
+        let emptyOk = store.calibrationResult == nil && store.calibrationErrorMessage == nil
+        report("empty-logs-no-result", emptyOk)
+        ok = ok && emptyOk
+
+        // Synthesize a qualifying ~130km trip and a non-qualifying ~3km trip -- a straight
+        // line at 27.8 m/s (1 Hz, 0.00025 deg lat per sample) so distance and speed agree.
+        let now = Int(Date().timeIntervalSince1970)
+        func straightLineSamples(count: Int) -> [TripSample] {
+            (0..<count).map { i in
+                TripSample(t: Double(i), lat: 49.0 + 0.00025 * Double(i), lon: 6.0, speedMps: 27.8, altM: 300, haccM: 5)
+            }
+        }
+        let longId = UUID().uuidString
+        let longLog = TripLog(
+            format: "tlog-1", id: longId, vehicle: "ioniq5_lr_2wd",
+            startUnix: now - 5000, endUnix: now,
+            startSocPct: 90, endSocPct: 55, ambientTempC: 15.0, samples: straightLineSamples(count: 4680)
+        )
+        let shortId = UUID().uuidString
+        let shortStartUnix = now - 6000
+        let shortLog = TripLog(
+            format: "tlog-1", id: shortId, vehicle: "ioniq5_lr_2wd",
+            startUnix: shortStartUnix, endUnix: shortStartUnix + 120,
+            startSocPct: 90, endSocPct: 89, ambientTempC: 15.0, samples: straightLineSamples(count: 120)
+        )
+        do {
+            try TripLogStorage.save(longLog)
+            try TripLogStorage.save(shortLog)
+        } catch {
+            report("calibration-computed", false, "failed to save synthetic logs: \(error)")
+            await finish(ok: false)
+        }
+
+        tripStore.refreshLogs()
+        guard tripStore.logs.count == 2 else {
+            report("calibration-computed", false, "expected 2 saved logs, got \(tripStore.logs.count)")
+            await finish(ok: false)
+        }
+
+        store.refreshCalibration(logURLs: tripStore.logs)
+        let computed = await waitWithTimeout(seconds: 30) { store.calibrationResult != nil }
+        report(
+            "calibration-computed", computed,
+            computed
+                ? "medianRatio=\(store.calibrationResult?.medianRatio ?? -1) "
+                    + "refit=\(store.calibrationResult?.referenceConsumptionWhPerKm ?? -1)"
+                : "calibrationErrorMessage=\(store.calibrationErrorMessage ?? "none")"
+        )
+        ok = ok && computed
+        guard let result = store.calibrationResult else { await finish(ok: false) }
+
+        // Per-trip rows: the long trip qualifies, the short one is used but too short.
+        let longFit = result.trips.first { $0.id == longId }
+        let shortFit = result.trips.first { $0.id == shortId }
+        let longOk = longFit?.used == true && longFit?.qualifying == true
+            && (100_000.0...160_000.0).contains(longFit?.distanceM ?? -1)
+        let shortOk = shortFit?.used == true && shortFit?.qualifying == false
+        let tripRowsOk = result.trips.count == 2 && longOk && shortOk
+        report(
+            "trip-rows", tripRowsOk,
+            "long used=\(String(describing: longFit?.used)) qualifying=\(String(describing: longFit?.qualifying)) "
+                + "distanceM=\(String(describing: longFit?.distanceM)); "
+                + "short used=\(String(describing: shortFit?.used)) qualifying=\(String(describing: shortFit?.qualifying))"
+        )
+        ok = ok && tripRowsOk
+
+        let medianOk = (0.5...2.0).contains(result.medianRatio)
+        let refitOk = (100.0...400.0).contains(result.referenceConsumptionWhPerKm)
+        report(
+            "median-band", medianOk && refitOk,
+            "medianRatio=\(result.medianRatio) refit=\(result.referenceConsumptionWhPerKm)"
+        )
+        ok = ok && medianOk && refitOk
+
+        report("accepted", result.accepted, "accepted=\(result.accepted)")
+        ok = ok && result.accepted
+
+        // Proposal + accept path: a plan must be in flight for planVersion to bump on accept.
+        store.setDestination(name: "Antwerp", coordinate: CLLocationCoordinate2D(latitude: 51.2194, longitude: 4.4025))
+        let destinationPlanLanded = await waitWithTimeout(seconds: 30) { store.planVersion >= 1 }
+        guard destinationPlanLanded else {
+            report("accept-replans", false, "Antwerp plan never landed before accept")
+            await finish(ok: false)
+        }
+
+        let versionBeforeAccept = store.planVersion
+        let clampedRefit = min(max(result.referenceConsumptionWhPerKm, 120), 260)
+        store.acceptCalibration()
+
+        let referenceSetOk = store.referenceConsumptionWhPerKm == clampedRefit
+        report(
+            "accept-sets-reference", referenceSetOk,
+            "expected \(clampedRefit), got \(String(describing: store.referenceConsumptionWhPerKm))"
+        )
+        ok = ok && referenceSetOk
+
+        let persistedValue = UserDefaults.standard.object(forKey: "referenceConsumptionWhPerKm") as? Double
+        let persistedOk = persistedValue == clampedRefit
+        report("accept-persists", persistedOk, "expected \(clampedRefit), got \(String(describing: persistedValue))")
+        ok = ok && persistedOk
+
+        let replanLanded = await waitWithTimeout(seconds: 30) { store.planVersion > versionBeforeAccept }
+        let acceptReplansOk = replanLanded && store.calibrationDismissed
+        report(
+            "accept-replans", acceptReplansOk,
+            "planVersion=\(store.planVersion) (was \(versionBeforeAccept)) calibrationDismissed=\(store.calibrationDismissed)"
+        )
+        ok = ok && acceptReplansOk
+
+        // Dismiss-sticky: refreshing over the SAME log set doesn't reset the dismissal --
+        // the reset check in refreshCalibration runs synchronously, before its async fetch.
+        store.refreshCalibration(logURLs: tripStore.logs)
+        let dismissStickyOk = store.calibrationDismissed
+        report("dismiss-sticky-same-logs", dismissStickyOk, "calibrationDismissed=\(store.calibrationDismissed)")
+        ok = ok && dismissStickyOk
+
+        // Dismiss-resets: a genuinely different log set (one log deleted) resets it.
+        if let urlToDelete = tripStore.logs.last {
+            try? TripLogStorage.delete(url: urlToDelete)
+        }
+        tripStore.refreshLogs()
+        store.refreshCalibration(logURLs: tripStore.logs)
+        let dismissResetOk = !store.calibrationDismissed
+        report("dismiss-resets-on-log-change", dismissResetOk, "calibrationDismissed=\(store.calibrationDismissed)")
+        ok = ok && dismissResetOk
+
+        // Error path: a corrupt log file fails the whole call loudly.
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let tripLogsDir = docs.appendingPathComponent("trip-logs", isDirectory: true)
+        try? FileManager.default.createDirectory(at: tripLogsDir, withIntermediateDirectories: true)
+        try? Data("not json".utf8).write(to: tripLogsDir.appendingPathComponent("tlog-zzz-corrupt.json"))
+        tripStore.refreshLogs()
+        store.refreshCalibration(logURLs: tripStore.logs)
+        let corruptFailedOk = await waitWithTimeout(seconds: 30) { store.calibrationErrorMessage != nil }
+        report(
+            "corrupt-log-fails-loudly", corruptFailedOk,
+            "calibrationErrorMessage=\(store.calibrationErrorMessage ?? "none")"
+        )
+        ok = ok && corruptFailedOk
+
+        // Cleanup.
+        TripLogStorage.list().forEach { try? TripLogStorage.delete(url: $0) }
+        UserDefaults.standard.removeObject(forKey: "referenceConsumptionWhPerKm")
+        store.referenceConsumptionWhPerKm = nil
 
         await finish(ok: ok)
     }

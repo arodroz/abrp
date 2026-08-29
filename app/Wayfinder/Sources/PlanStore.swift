@@ -6,10 +6,13 @@
 // bootstrap, and, for the arrival-card ticket (#43), the stop-free alternative toggle and the
 // SoC-scrub marker sync (ported from prototype/planner-ui's PlanStore.updateScrubMarker()), and,
 // for the settings sheet (#44), didSet-triggered replans on every planner-affecting request
-// field plus the appearance override (the only setting that persists, to UserDefaults), and,
+// field plus the appearance override (persisted to UserDefaults), and,
 // for the pack installer (#47), `region` becoming a persisted `activeRegion` with a
 // `setActiveRegion(_:)` that resets route state and reloads, and the corridor-only origin gate
-// generalizing to RegionBounds.swift's per-region table.
+// generalizing to RegionBounds.swift's per-region table, and, for the refit acceptance UX
+// (#53), `referenceConsumptionWhPerKm` becoming a third persisted setting and new calibration
+// state (`calibrationResult`/`calibrationErrorMessage`/`calibrationDismissed`) recomputed via
+// `PlannerClient.calibrate` whenever the settings sheet's Trip Logs list changes.
 import CoreLocation
 import Foundation
 import MapLibre
@@ -104,10 +107,21 @@ final class PlanStore: NSObject, @preconcurrency MLNMapViewDelegate, @preconcurr
     var batteryWarmth = 1.0
     var offerStopFreeAlternative = true
     var vehicle: FfiVehicle = .ioniq5Lr2wd
-    /// nil = vehicle default reference consumption; the settings sheet's Toggle sets/clears this.
+    /// nil = vehicle default reference consumption; the settings sheet's Toggle sets/clears
+    /// this, and so does `acceptCalibration()` (wayfinder #53). Persisted to UserDefaults like
+    /// `appearanceOverride`/`activeRegion` below: read once at init, written here on every change.
     var referenceConsumptionWhPerKm: Double? {
-        didSet { guard oldValue != referenceConsumptionWhPerKm else { return }; replan() }
+        didSet {
+            guard oldValue != referenceConsumptionWhPerKm else { return }
+            if let referenceConsumptionWhPerKm {
+                UserDefaults.standard.set(referenceConsumptionWhPerKm, forKey: Self.referenceConsumptionWhPerKmKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: Self.referenceConsumptionWhPerKmKey)
+            }
+            replan()
+        }
     }
+    private static let referenceConsumptionWhPerKmKey = "referenceConsumptionWhPerKm"
 
     // MARK: Settings sheet state (wayfinder #44)
 
@@ -116,8 +130,9 @@ final class PlanStore: NSObject, @preconcurrency MLNMapViewDelegate, @preconcurr
     var showingSettings = false
 
     /// "system" / "light" / "dark", persisted to UserDefaults (read once at init) so it
-    /// survives relaunch -- the only setting in this ticket that persists (see PlanStore.swift
-    /// header). `updateAppearance(systemDark:)` combines it with the live system scheme.
+    /// survives relaunch -- the only setting in this ticket that persists (others have joined it
+    /// since; see PlanStore.swift header). `updateAppearance(systemDark:)` combines it with the
+    /// live system scheme.
     var appearanceOverride: String {
         didSet {
             guard oldValue != appearanceOverride else { return }
@@ -193,6 +208,7 @@ final class PlanStore: NSObject, @preconcurrency MLNMapViewDelegate, @preconcurr
     override init() {
         appearanceOverride = UserDefaults.standard.string(forKey: Self.appearanceOverrideKey) ?? "system"
         activeRegion = UserDefaults.standard.string(forKey: Self.activeRegionKey) ?? "corridor"
+        referenceConsumptionWhPerKm = UserDefaults.standard.object(forKey: Self.referenceConsumptionWhPerKmKey) as? Double
         super.init()
         mapView.delegate = self
         mapView.showsUserLocation = true
@@ -370,6 +386,90 @@ final class PlanStore: NSObject, @preconcurrency MLNMapViewDelegate, @preconcurr
             scrubAnnotation = annotation
         }
         mapView.setCenter(coordinate, animated: true)
+    }
+
+    // MARK: Calibration (wayfinder #53)
+
+    /// The refit-and-accept flow's result of the last `PlannerClient.calibrate` call, or nil
+    /// before the first one lands (or after an empty Trip Log set clears it).
+    private(set) var calibrationResult: FfiCalibrationResult?
+    /// Set on a failed `calibrate` call (e.g. a corrupt log -- `PlannerError.InvalidRequest`
+    /// names the offending log index) and cleared on the next success. Corrupt logs failing
+    /// loudly rather than being silently skipped is deliberate (ADR 0009 audit ethos).
+    private(set) var calibrationErrorMessage: String?
+    /// Hides the proposal row in SettingsForm's Calibration section without discarding
+    /// `calibrationResult` itself -- set by `acceptCalibration()`/`dismissCalibration()`, reset
+    /// whenever the Trip Log set changes.
+    private(set) var calibrationDismissed = false
+    private var calibrationGeneration = 0
+    /// The (sorted) log URL set `calibrationResult`/`calibrationDismissed` belong to -- lets
+    /// `refreshCalibration` tell a genuinely new log set (which should reset the dismissal)
+    /// apart from a redundant re-run over the same one.
+    private var calibrationLogURLs: [URL] = []
+
+    /// Recomputes calibration for `logURLs` (SettingsForm's Trip Logs list) via
+    /// `PlannerClient.calibrate` -- ADR 0009's refit-and-accept flow. Called from
+    /// SettingsForm.onAppear and after every Trip Log add/delete. Generation-guarded like
+    /// `replan()`: a superseded call's result or error is dropped.
+    func refreshCalibration(logURLs: [URL]) {
+        let sortedURLs = logURLs.sorted { $0.path < $1.path }
+        if sortedURLs != calibrationLogURLs {
+            calibrationDismissed = false
+            calibrationLogURLs = sortedURLs
+        }
+
+        guard !sortedURLs.isEmpty else {
+            calibrationResult = nil
+            calibrationErrorMessage = nil
+            return
+        }
+        guard plannerStatus == .ready, let client else { return }
+
+        calibrationGeneration += 1
+        let gen = calibrationGeneration
+        let vehicle = vehicle
+        let referenceConsumptionWhPerKm = referenceConsumptionWhPerKm
+
+        Task {
+            do {
+                let result = try await Self.readLogsAndCalibrate(
+                    client: client, urls: sortedURLs, vehicle: vehicle,
+                    referenceConsumptionWhPerKm: referenceConsumptionWhPerKm
+                )
+                guard gen == self.calibrationGeneration else { return }
+                calibrationResult = result
+                calibrationErrorMessage = nil
+            } catch {
+                guard gen == self.calibrationGeneration else { return }
+                calibrationErrorMessage = "Calibration failed: \(error)"
+                calibrationResult = nil
+            }
+        }
+    }
+
+    /// Reads each log file's JSON text and calls `PlannerClient.calibrate` -- `nonisolated` so
+    /// `await`ing it from `refreshCalibration` hops off the main actor for the (small but
+    /// synchronous) file reads too, not just for `calibrate`'s own already-detached Rust call.
+    nonisolated private static func readLogsAndCalibrate(
+        client: PlannerClient, urls: [URL], vehicle: FfiVehicle, referenceConsumptionWhPerKm: Double?
+    ) async throws -> FfiCalibrationResult {
+        let logs = try urls.map { try String(contentsOf: $0, encoding: .utf8) }
+        return try await client.calibrate(logs: logs, vehicle: vehicle, referenceConsumptionWhPerKm: referenceConsumptionWhPerKm)
+    }
+
+    /// Applies the proposed refit as the new Reference Consumption override, clamped to the
+    /// settings sheet's Stepper range (120...260 Wh/km -- SettingsForm.swift) since a refit
+    /// outside that range couldn't be represented there anyway. `referenceConsumptionWhPerKm`'s
+    /// existing didSet persists it and replans.
+    func acceptCalibration() {
+        guard let result = calibrationResult else { return }
+        referenceConsumptionWhPerKm = min(max(result.referenceConsumptionWhPerKm, 120), 260)
+        calibrationDismissed = true
+    }
+
+    /// Hides the proposal row without discarding the metric display.
+    func dismissCalibration() {
+        calibrationDismissed = true
     }
 
     // MARK: MLNMapViewDelegate
