@@ -3,7 +3,7 @@
 //! region, per wayfinder ticket #35 (ADR 0005, 0007, 0008).
 //!
 //! ```text
-//! build_packs --region lu-dev|corridor [--sources DIR=~/abrp-data] [--out DIR]
+//! build_packs --region lu-dev|corridor|eu-west [--sources DIR=~/abrp-data] [--out DIR]
 //!             [--jobs region,chargers,map] [--protomaps-build 20260827]
 //!             [--dem-cache DIR=<sources>/dem]
 //! ```
@@ -65,7 +65,7 @@ fn parse_args() -> Args {
     let dem_cache = dem_cache.unwrap_or_else(|| sources.join("dem"));
 
     Args {
-        region: region.expect("--region is required (lu-dev or corridor)"),
+        region: region.expect("--region is required (lu-dev, corridor, or eu-west)"),
         out: out.unwrap_or_else(|| PathBuf::from("out")),
         jobs: jobs.unwrap_or_else(|| {
             ["region", "chargers", "map"]
@@ -79,20 +79,38 @@ fn parse_args() -> Args {
     }
 }
 
+/// A national charger feed `run_chargers_job` knows how to parse. A region
+/// opts into the feeds whose country it actually covers.
+#[derive(PartialEq, Eq)]
+enum ChargerFeed {
+    Ndw,
+    RoadBe,
+    ChargyKml,
+    IrveFr,
+    Bnetza,
+}
+
 /// Built-in region registry: which PBFs make up each region, its display
-/// name, and its `.rpack` header id.
+/// name, its `.rpack` header id, and which charger feeds it draws from.
 struct RegionSpec {
     pbfs: &'static [&'static str],
     region_name: &'static str,
     region_numeric_id: u32,
+    charger_feeds: &'static [ChargerFeed],
 }
 
 fn region_spec(region: &str) -> RegionSpec {
+    const BENELUX_FEEDS: &[ChargerFeed] = &[
+        ChargerFeed::Ndw,
+        ChargerFeed::RoadBe,
+        ChargerFeed::ChargyKml,
+    ];
     match region {
         "lu-dev" => RegionSpec {
             pbfs: &["luxembourg-latest.osm.pbf"],
             region_name: "Luxembourg (dev)",
             region_numeric_id: 1,
+            charger_feeds: BENELUX_FEEDS,
         },
         "corridor" => RegionSpec {
             pbfs: &[
@@ -102,8 +120,27 @@ fn region_spec(region: &str) -> RegionSpec {
             ],
             region_name: "LU+BE+NL corridor",
             region_numeric_id: 2,
+            charger_feeds: BENELUX_FEEDS,
         },
-        other => panic!("unknown region {other:?}; known regions: lu-dev, corridor"),
+        "eu-west" => RegionSpec {
+            pbfs: &[
+                "luxembourg-latest.osm.pbf",
+                "belgium-latest.osm.pbf",
+                "netherlands-latest.osm.pbf",
+                "france-latest.osm.pbf",
+                "germany-latest.osm.pbf",
+            ],
+            region_name: "Benelux+FR+DE",
+            region_numeric_id: 3,
+            charger_feeds: &[
+                ChargerFeed::Ndw,
+                ChargerFeed::RoadBe,
+                ChargerFeed::ChargyKml,
+                ChargerFeed::IrveFr,
+                ChargerFeed::Bnetza,
+            ],
+        },
+        other => panic!("unknown region {other:?}; known regions: lu-dev, corridor, eu-west"),
     }
 }
 
@@ -201,36 +238,79 @@ fn run_region_job(args: &Args, spec: &RegionSpec) -> (PathBuf, (f64, f64, f64, f
     (rpack_path, bbox, epoch)
 }
 
-/// Runs the `chargers` job: parses all three feeds, clips to the graph
+/// Runs the `chargers` job: parses the region's listed feeds (`spec.
+/// charger_feeds` -- the charger bbox clip below is a bounding rectangle,
+/// not a polygon, so a region must opt into feeds, or corridor's rectangle
+/// sweeps in FR/DE stations its road graph has no roads for, which would
+/// then snap onto Benelux roads as phantom candidates), clips to the graph
 /// bbox (from this session's `region` job if it ran, else read back from
 /// an existing `.rpack`, else unfiltered with a warning), writes the
 /// Charger Pack.
-fn run_chargers_job(args: &Args, region_bbox: Option<(f64, f64, f64, f64)>) -> PathBuf {
+fn run_chargers_job(
+    args: &Args,
+    spec: &RegionSpec,
+    region_bbox: Option<(f64, f64, f64, f64)>,
+) -> PathBuf {
     let mut records = Vec::new();
+    let feeds = spec.charger_feeds;
 
-    let ndw_path = args.sources.join("ndw_chargers.json.gz");
-    match chargers::parse_ndw_gz(&ndw_path) {
-        Ok(mut v) => records.append(&mut v),
-        Err(e) => println!(
-            "[build_packs] chargers: warning: {}: {e}",
-            ndw_path.display()
-        ),
+    if feeds.contains(&ChargerFeed::Ndw) {
+        let ndw_path = args.sources.join("ndw_chargers.json.gz");
+        match chargers::parse_ndw_gz(&ndw_path) {
+            Ok(mut v) => records.append(&mut v),
+            Err(e) => println!(
+                "[build_packs] chargers: warning: {}: {e}",
+                ndw_path.display()
+            ),
+        }
     }
-    let road_path = args.sources.join("road_chargers.json");
-    match chargers::parse_roadbe(&road_path) {
-        Ok(mut v) => records.append(&mut v),
-        Err(e) => println!(
-            "[build_packs] chargers: warning: {}: {e}",
-            road_path.display()
-        ),
+    if feeds.contains(&ChargerFeed::RoadBe) {
+        let road_path = args.sources.join("road_chargers.json");
+        match chargers::parse_roadbe(&road_path) {
+            Ok(mut v) => records.append(&mut v),
+            Err(e) => println!(
+                "[build_packs] chargers: warning: {}: {e}",
+                road_path.display()
+            ),
+        }
     }
-    let chargy_path = args.sources.join("chargy.kml");
-    match chargers::parse_chargy_kml(&chargy_path) {
-        Ok(mut v) => records.append(&mut v),
-        Err(e) => println!(
-            "[build_packs] chargers: warning: {}: {e}",
-            chargy_path.display()
-        ),
+    if feeds.contains(&ChargerFeed::ChargyKml) {
+        let chargy_path = args.sources.join("chargy.kml");
+        match chargers::parse_chargy_kml(&chargy_path) {
+            Ok(mut v) => records.append(&mut v),
+            Err(e) => println!(
+                "[build_packs] chargers: warning: {}: {e}",
+                chargy_path.display()
+            ),
+        }
+    }
+    if feeds.contains(&ChargerFeed::IrveFr) {
+        let irve_path = args.sources.join("irve_fr.csv");
+        match chargers::parse_irve_fr(&irve_path) {
+            Ok(mut v) => records.append(&mut v),
+            Err(e) => println!(
+                "[build_packs] chargers: warning: {}: {e}",
+                irve_path.display()
+            ),
+        }
+    }
+    if feeds.contains(&ChargerFeed::Bnetza) {
+        let bnetza_ladestation_path = args.sources.join("bnetza_api_ladestation000.csv");
+        let bnetza_ladepunkt_path = args.sources.join("bnetza_api_ladepunkt000.csv");
+        let bnetza_stecker_path = args.sources.join("bnetza_api_stecker000.csv");
+        match chargers::parse_bnetza(
+            &bnetza_ladestation_path,
+            &bnetza_ladepunkt_path,
+            &bnetza_stecker_path,
+        ) {
+            Ok(mut v) => records.append(&mut v),
+            Err(e) => println!(
+                "[build_packs] chargers: warning: bnetza ({}, {}, {}): {e}",
+                bnetza_ladestation_path.display(),
+                bnetza_ladepunkt_path.display(),
+                bnetza_stecker_path.display()
+            ),
+        }
     }
     println!(
         "[build_packs] chargers: parsed {} candidate locations",
@@ -324,7 +404,7 @@ fn main() {
     }
 
     if args.jobs.iter().any(|j| j == "chargers") {
-        let path = run_chargers_job(&args, region_bbox);
+        let path = run_chargers_job(&args, &spec, region_bbox);
         new_artifacts.push(("charger_pack", path));
     }
 

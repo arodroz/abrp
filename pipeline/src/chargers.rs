@@ -1,11 +1,13 @@
-//! Charger Pack builder: normalizes the three national open Charger feeds
-//! (NL DOT-NL OCPI JSON, BE transportdata.be OCPI JSON, LU Chargy KML) to an
-//! OCPI-like record -- "connectors, max_electric_power, operator, access"
-//! per ADR 0005 point 1 -- and writes the `.json` Charger Pack artifact.
-//! Ports the throwaway `prototype/vertical-slice`'s three parsers, but
+//! Charger Pack builder: normalizes the national open Charger feeds (NL
+//! DOT-NL OCPI JSON, BE transportdata.be OCPI JSON, LU Chargy KML, FR IRVE
+//! consolidated CSV, DE BNetzA Ladesäulenregister CSVs) to an OCPI-like
+//! record -- "connectors, max_electric_power, operator, access" per ADR
+//! 0005 point 1 -- and writes the `.json` Charger Pack artifact. Ports the
+//! throwaway `prototype/vertical-slice`'s three original parsers, but
 //! keeps every connector of an included location (not just the qualifying
 //! CCS one) so the app can show connector types on a Charging Stop.
 
+use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Read};
 use std::path::Path;
@@ -244,6 +246,340 @@ pub fn parse_chargy_kml(path: &Path) -> io::Result<Vec<ChargerRecord>> {
 }
 
 // ---------------------------------------------------------------------
+// France -- IRVE consolidated CSV (transport.data.gouv.fr)
+// ---------------------------------------------------------------------
+
+/// One row of the IRVE consolidated CSV: one row per charge point (pdc);
+/// several rows share a station id for a multi-pdc station.
+#[derive(Deserialize)]
+struct IrveRow {
+    nom_operateur: String,
+    id_station_itinerance: String,
+    id_station_local: String,
+    nom_station: String,
+    #[serde(rename = "coordonneesXY")]
+    coordonnees_xy: String,
+    puissance_nominale: f64,
+    prise_type_ef: bool,
+    prise_type_2: bool,
+    prise_type_combo_ccs: bool,
+    prise_type_chademo: bool,
+    prise_type_autre: bool,
+    condition_acces: String,
+}
+
+/// Parses `coordonneesXY`'s `"[lon, lat]"` shape into `(lat, lon)`.
+fn parse_lon_lat_bracket(s: &str) -> Option<(f64, f64)> {
+    let inner = s.trim().strip_prefix('[')?.strip_suffix(']')?;
+    let mut parts = inner.split(',').map(str::trim);
+    let lon: f64 = parts.next()?.parse().ok()?;
+    let lat: f64 = parts.next()?.parse().ok()?;
+    Some((lat, lon))
+}
+
+/// This pdc row's connectors: one per plug-type flag set on it, all
+/// sharing the row's `puissance_nominale`. Standards are named so
+/// `is_ccs` recognizes the CCS/Combo one, mirroring the OCPI parsers.
+fn irve_row_connectors(row: &IrveRow) -> Vec<Connector> {
+    let power_kw = row.puissance_nominale as f32;
+    let flags: [(bool, &str); 5] = [
+        (row.prise_type_combo_ccs, "IEC_62196_T2_COMBO"),
+        (row.prise_type_chademo, "CHADEMO"),
+        (row.prise_type_2, "IEC_62196_T2"),
+        (row.prise_type_ef, "DOMESTIC_E_F"),
+        (row.prise_type_autre, "OTHER"),
+    ];
+    flags
+        .into_iter()
+        .filter(|(set, _)| *set)
+        .map(|(_, standard)| Connector {
+            standard: standard.to_string(),
+            power_kw,
+        })
+        .collect()
+}
+
+/// Accumulates one FR station's pdc rows while scanning the CSV.
+struct IrveStationAcc {
+    name: String,
+    lat: f64,
+    lon: f64,
+    operator: String,
+    access: String,
+    connectors: Vec<Connector>,
+    best_ccs_power_w: f64,
+}
+
+fn parse_irve_fr_str(s: &str) -> Vec<ChargerRecord> {
+    let mut reader = csv::Reader::from_reader(s.as_bytes());
+    let mut order: Vec<String> = Vec::new();
+    let mut stations: HashMap<String, IrveStationAcc> = HashMap::new();
+
+    for result in reader.deserialize::<IrveRow>() {
+        let Ok(row) = result else { continue };
+        let Some((lat, lon)) = parse_lon_lat_bracket(&row.coordonnees_xy) else {
+            continue;
+        };
+        let station_id = if !row.id_station_itinerance.is_empty() {
+            row.id_station_itinerance.clone()
+        } else {
+            row.id_station_local.clone()
+        };
+        if station_id.is_empty() {
+            continue;
+        }
+
+        let connectors = irve_row_connectors(&row);
+        let power_w = row.puissance_nominale * 1000.0;
+        let row_best_ccs = if connectors.iter().any(|c| is_ccs(&c.standard)) && power_w >= MIN_DC_POWER_W {
+            power_w
+        } else {
+            0.0
+        };
+
+        let acc = stations.entry(station_id.clone()).or_insert_with(|| {
+            order.push(station_id.clone());
+            IrveStationAcc {
+                name: row.nom_station.clone(),
+                lat,
+                lon,
+                operator: row.nom_operateur.clone(),
+                access: row.condition_acces.clone(),
+                connectors: Vec::new(),
+                best_ccs_power_w: 0.0,
+            }
+        });
+        acc.connectors.extend(connectors);
+        acc.best_ccs_power_w = acc.best_ccs_power_w.max(row_best_ccs);
+    }
+
+    order
+        .into_iter()
+        .filter_map(|id| {
+            let acc = stations.remove(&id)?;
+            if acc.best_ccs_power_w <= 0.0 {
+                return None;
+            }
+            Some(ChargerRecord {
+                id: format!("irve:{id}"),
+                name: acc.name,
+                lat: acc.lat,
+                lon: acc.lon,
+                operator: Some(acc.operator).filter(|s| !s.is_empty()),
+                access: Some(acc.access).filter(|s| !s.is_empty()),
+                country: "FR".to_string(),
+                max_power_kw: (acc.best_ccs_power_w / 1000.0) as f32,
+                connectors: acc.connectors,
+                source: "irve".to_string(),
+            })
+        })
+        .collect()
+}
+
+/// Reads the IRVE consolidated CSV (`irve_fr.csv`), grouping pdc rows into
+/// stations by `id_station_itinerance` (falling back to `id_station_local`).
+pub fn parse_irve_fr(path: &Path) -> io::Result<Vec<ChargerRecord>> {
+    let s = fs::read_to_string(path)?;
+    Ok(parse_irve_fr_str(&s))
+}
+
+// ---------------------------------------------------------------------
+// Germany -- BNetzA Ladesäulenregister (three joined CSVs)
+// ---------------------------------------------------------------------
+
+/// A parseable float that may use a decimal comma (German locale) instead
+/// of a decimal point.
+fn parse_de_float(s: &str) -> Option<f64> {
+    let s = s.trim();
+    s.parse().ok().or_else(|| s.replace(',', ".").parse().ok())
+}
+
+#[derive(Deserialize)]
+struct BnetzaStation {
+    ladestation_id: String,
+    betreiber: String,
+    strasse: String,
+    hausnummer: String,
+    ort: String,
+    laengengrad: String,
+    breitengrad: String,
+    zugangsbeschraenkung: String,
+}
+
+#[derive(Deserialize)]
+struct BnetzaLadepunkt {
+    ladepunkt_hk: String,
+    ladestation_id: String,
+}
+
+// BNetzA's boolean columns are `t`/`f`, not serde's `true`/`false`, so
+// they're read as strings and compared explicitly rather than as `bool`.
+#[derive(Deserialize)]
+struct BnetzaStecker {
+    ladepunkt_hk: String,
+    max_ladeleistung_stecker: String,
+    stecker_ac_schucko: String,
+    stecker_ac_typ2_steckdose: String,
+    stecker_ac_type2_kupplung: String,
+    stecker_dc_ccs: String,
+    stecker_dc_chademo: String,
+    stecker_ac_type1_steckdose: String,
+    stecker_dc_tesla_kupplung: String,
+    stecker_ac_cee_3: String,
+    stecker_ac_cee_5: String,
+}
+
+/// The stecker's connector standard, named so `is_ccs` recognizes the CCS
+/// one -- `None` for a row with no recognized plug flag set (malformed).
+fn stecker_standard(row: &BnetzaStecker) -> Option<&'static str> {
+    let t = |s: &str| s == "t";
+    if t(&row.stecker_dc_ccs) {
+        Some("IEC_62196_T2_COMBO")
+    } else if t(&row.stecker_dc_chademo) {
+        Some("CHADEMO")
+    } else if t(&row.stecker_dc_tesla_kupplung) {
+        Some("TESLA")
+    } else if t(&row.stecker_ac_typ2_steckdose) || t(&row.stecker_ac_type2_kupplung) {
+        Some("IEC_62196_T2")
+    } else if t(&row.stecker_ac_type1_steckdose) {
+        Some("IEC_62196_T1")
+    } else if t(&row.stecker_ac_schucko) {
+        Some("DOMESTIC_SCHUKO")
+    } else if t(&row.stecker_ac_cee_3) || t(&row.stecker_ac_cee_5) {
+        Some("CEE")
+    } else {
+        None
+    }
+}
+
+/// BNetzA has no station name field; built from the street address, since
+/// that's the closest identifying string the register provides.
+fn bnetza_station_name(row: &BnetzaStation) -> String {
+    let street = format!("{} {}", row.strasse.trim(), row.hausnummer.trim());
+    let street = street.trim();
+    if street.is_empty() {
+        row.ort.clone()
+    } else {
+        format!("{street}, {}", row.ort)
+    }
+}
+
+/// Accumulates one DE station's stecker rows while scanning the CSVs.
+struct BnetzaStationAcc {
+    name: String,
+    lat: f64,
+    lon: f64,
+    operator: String,
+    access: String,
+    connectors: Vec<Connector>,
+    best_ccs_power_w: f64,
+}
+
+fn parse_bnetza_str(ladestation: &str, ladepunkt: &str, stecker: &str) -> Vec<ChargerRecord> {
+    let mut order: Vec<String> = Vec::new();
+    let mut stations: HashMap<String, BnetzaStationAcc> = HashMap::new();
+    for result in csv::ReaderBuilder::new()
+        .delimiter(b';')
+        .from_reader(ladestation.as_bytes())
+        .deserialize::<BnetzaStation>()
+    {
+        let Ok(row) = result else { continue };
+        let (Some(lat), Some(lon)) = (parse_de_float(&row.breitengrad), parse_de_float(&row.laengengrad))
+        else {
+            continue;
+        };
+        order.push(row.ladestation_id.clone());
+        stations.insert(
+            row.ladestation_id.clone(),
+            BnetzaStationAcc {
+                name: bnetza_station_name(&row),
+                lat,
+                lon,
+                operator: row.betreiber.clone(),
+                access: row.zugangsbeschraenkung.clone(),
+                connectors: Vec::new(),
+                best_ccs_power_w: 0.0,
+            },
+        );
+    }
+
+    let mut ladepunkt_to_station: HashMap<String, String> = HashMap::new();
+    for result in csv::ReaderBuilder::new()
+        .delimiter(b';')
+        .from_reader(ladepunkt.as_bytes())
+        .deserialize::<BnetzaLadepunkt>()
+    {
+        let Ok(row) = result else { continue };
+        ladepunkt_to_station.insert(row.ladepunkt_hk, row.ladestation_id);
+    }
+
+    for result in csv::ReaderBuilder::new()
+        .delimiter(b';')
+        .from_reader(stecker.as_bytes())
+        .deserialize::<BnetzaStecker>()
+    {
+        let Ok(row) = result else { continue };
+        let Some(standard) = stecker_standard(&row) else {
+            continue;
+        };
+        let Some(power_kw) = parse_de_float(&row.max_ladeleistung_stecker) else {
+            continue;
+        };
+        let Some(station_id) = ladepunkt_to_station.get(&row.ladepunkt_hk) else {
+            continue;
+        };
+        let Some(acc) = stations.get_mut(station_id) else {
+            continue;
+        };
+        let power_w = power_kw * 1000.0;
+        if is_ccs(standard) && power_w >= MIN_DC_POWER_W {
+            acc.best_ccs_power_w = acc.best_ccs_power_w.max(power_w);
+        }
+        acc.connectors.push(Connector {
+            standard: standard.to_string(),
+            power_kw: power_kw as f32,
+        });
+    }
+
+    order
+        .into_iter()
+        .filter_map(|id| {
+            let acc = stations.remove(&id)?;
+            if acc.best_ccs_power_w <= 0.0 {
+                return None;
+            }
+            Some(ChargerRecord {
+                id: format!("bnetza:{id}"),
+                name: acc.name,
+                lat: acc.lat,
+                lon: acc.lon,
+                operator: Some(acc.operator).filter(|s| !s.is_empty()),
+                access: Some(acc.access).filter(|s| !s.is_empty()),
+                country: "DE".to_string(),
+                max_power_kw: (acc.best_ccs_power_w / 1000.0) as f32,
+                connectors: acc.connectors,
+                source: "bnetza".to_string(),
+            })
+        })
+        .collect()
+}
+
+/// Reads BNetzA's three joined CSVs: `ladestation_path` (stations),
+/// `ladepunkt_path` (charge points, FK to station), `stecker_path`
+/// (connectors, FK to charge point) -- the same three-level shape as an
+/// OCPI Location -> EVSE -> connector.
+pub fn parse_bnetza(
+    ladestation_path: &Path,
+    ladepunkt_path: &Path,
+    stecker_path: &Path,
+) -> io::Result<Vec<ChargerRecord>> {
+    let ladestation = fs::read_to_string(ladestation_path)?;
+    let ladepunkt = fs::read_to_string(ladepunkt_path)?;
+    let stecker = fs::read_to_string(stecker_path)?;
+    Ok(parse_bnetza_str(&ladestation, &ladepunkt, &stecker))
+}
+
+// ---------------------------------------------------------------------
 // bbox filter + Charger Pack writer
 // ---------------------------------------------------------------------
 
@@ -436,5 +772,70 @@ mod tests {
         assert_eq!(value["charger_count"], 1);
         assert_eq!(value["chargers"].as_array().unwrap().len(), 1);
         assert!(value["built_at_epoch"].as_u64().unwrap() > 0);
+    }
+
+    const IRVE_FR_CSV: &str = "nom_operateur,id_station_itinerance,id_station_local,nom_station,coordonneesXY,puissance_nominale,prise_type_ef,prise_type_2,prise_type_combo_ccs,prise_type_chademo,prise_type_autre,condition_acces\n\
+        IONITY,FR_MULTI,,\"Parking, Centre Ville\",\"[6.1, 49.5]\",22,false,true,false,false,false,Accès libre\n\
+        IONITY,FR_MULTI,,\"Parking, Centre Ville\",\"[6.1, 49.5]\",150,false,false,true,false,false,Accès libre\n\
+        Chargepoint,FR_LOWPOWER,,Low Power Site,\"[5.0, 45.0]\",22,false,false,true,false,false,Accès libre\n\
+        BadOperator,FR_BAD,,Bad Row,\"[5.0,45.0]\",N/A,false,false,true,false,false,Accès libre\n";
+
+    #[test]
+    fn irve_fr_groups_pdcs_into_stations_and_keeps_only_qualifying_ones() {
+        let out = parse_irve_fr_str(IRVE_FR_CSV);
+        // FR_LOWPOWER (CCS but 22 kW) and FR_BAD (malformed power) are dropped.
+        assert_eq!(out.len(), 1);
+        let r = &out[0];
+        assert_eq!(r.id, "irve:FR_MULTI");
+        // Embedded comma inside the quoted field is preserved.
+        assert_eq!(r.name, "Parking, Centre Ville");
+        assert_eq!(r.operator.as_deref(), Some("IONITY"));
+        assert_eq!(r.access.as_deref(), Some("Accès libre"));
+        assert_eq!(r.country, "FR");
+        // Both pdcs (AC + qualifying CCS) are kept on the station.
+        assert_eq!(r.connectors.len(), 2);
+        assert_eq!(r.max_power_kw, 150.0);
+        assert!((r.lat - 49.5).abs() < 1e-9);
+        assert!((r.lon - 6.1).abs() < 1e-9);
+    }
+
+    const BNETZA_LADESTATION_CSV: &str = "ladestation_id;betreiber;strasse;hausnummer;ort;laengengrad;breitengrad;zugangsbeschraenkung\n\
+        DE1;\"IONITY GmbH; Fastcharging\";Hauptstr.;5;Berlin;13,405;52,52;Keine Beschränkung\n\
+        DE2;Stadtwerke;Nebenstr.;1;Hamburg;10.0;53.55;Keine Beschränkung\n\
+        DE3;BadOp;X;1;NoWhere;bad;bad;Keine Beschränkung\n";
+
+    const BNETZA_LADEPUNKT_CSV: &str = "ladepunkt_hk;ladestation_id\n\
+        LP1;DE1\n\
+        LP2;DE2\n\
+        LP3;DE3\n";
+
+    const BNETZA_STECKER_CSV: &str = "stecker_id;ladepunkt_hk;max_ladeleistung_stecker;stecker_ac_schucko;stecker_ac_typ2_steckdose;stecker_ac_type2_kupplung;stecker_dc_ccs;stecker_dc_chademo;stecker_ac_type1_steckdose;stecker_dc_tesla_kupplung;stecker_ac_cee_3;stecker_ac_cee_5\n\
+        ST1;LP1;150;f;f;f;t;f;f;f;f;f\n\
+        ST2;LP2;20;f;f;f;t;f;f;f;f;f\n\
+        ST3;LP3;150;f;f;f;t;f;f;f;f;f\n\
+        ST4;LP1;bad;f;f;f;t;f;f;f;f;f\n";
+
+    #[test]
+    fn bnetza_joins_three_csvs_handles_decimal_commas_and_keeps_only_qualifying_stations() {
+        let out = parse_bnetza_str(
+            BNETZA_LADESTATION_CSV,
+            BNETZA_LADEPUNKT_CSV,
+            BNETZA_STECKER_CSV,
+        );
+        // DE2 (CCS but 20 kW) is filtered out; DE3 has malformed lat/lon so
+        // it's never a station, and its stecker row (ST3) is orphaned.
+        assert_eq!(out.len(), 1);
+        let r = &out[0];
+        assert_eq!(r.id, "bnetza:DE1");
+        // Quoted field embedding the ';' delimiter is preserved.
+        assert_eq!(r.operator.as_deref(), Some("IONITY GmbH; Fastcharging"));
+        assert_eq!(r.access.as_deref(), Some("Keine Beschränkung"));
+        assert_eq!(r.country, "DE");
+        // Decimal-comma lat/lon parsed correctly.
+        assert!((r.lat - 52.52).abs() < 1e-9);
+        assert!((r.lon - 13.405).abs() < 1e-9);
+        assert_eq!(r.max_power_kw, 150.0);
+        // ST4's malformed power is skipped, so only ST1 becomes a connector.
+        assert_eq!(r.connectors.len(), 1);
     }
 }
