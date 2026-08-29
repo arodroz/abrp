@@ -6,7 +6,8 @@
 // independent of the (placeholder) UI. `--autotest editor-smoke` (wayfinder
 // #40) extends this to drive the route editor's store mutations directly --
 // there's no UI-event injection on the sim, so the editor UI itself is
-// verified separately, by screenshot.
+// verified separately, by screenshot. `--autotest card-smoke` (wayfinder #43)
+// does the same for the result card + SoC chart + scrub marker.
 import CoreLocation
 import Foundation
 import MapLibre
@@ -31,6 +32,10 @@ enum Autotest {
         case "editor-smoke":
             Task.detached(priority: .userInitiated) {
                 await runEditorSmoke(store: store)
+            }
+        case "card-smoke":
+            Task.detached(priority: .userInitiated) {
+                await runCardSmoke(store: store)
             }
         default:
             break
@@ -266,6 +271,99 @@ enum Autotest {
         let arrivalSoc = plan.socCurve.last?.soc ?? -1
         if !isClose(arrivalSoc, 0.174, tol: 0.005) { failures.append("arrivalSoc=\(arrivalSoc)") }
         return (failures.isEmpty, failures.joined(separator: "; "))
+    }
+
+    // MARK: card-smoke
+
+    /// Drives the store directly (no UI-event injection exists on the sim; the result card,
+    /// chips, itinerary, and SoC chart are verified separately, by screenshot). Proves: the
+    /// LU -> Amsterdam golden plan lands with its one stop, the derived dist-from-start for
+    /// that stop (ChargingStopVM.stops(from:), wayfinder #43) matches the SoC curve's own
+    /// post-charge jump, no stop-free alternative is offered for this non-micro stop despite
+    /// `offerStopFreeAlternative` now defaulting to true, and the scrub marker lands near the
+    /// stop's own coordinate.
+    @MainActor
+    private static func runCardSmoke(store: PlanStore) async {
+        // Pin the origin before anything else -- same determinism rationale as editor-smoke.
+        store.setOrigin(CLLocationCoordinate2D(latitude: 49.6116, longitude: 6.1319))
+        store.load()
+
+        let ready = await waitWithTimeout(seconds: 30) { store.plannerStatus == .ready }
+        report("planner-ready", ready)
+        guard ready else { await finish(ok: false, sleepSeconds: 8) }
+
+        var ok = true
+
+        store.setDestination(name: "Amsterdam", coordinate: CLLocationCoordinate2D(latitude: 52.3702, longitude: 4.8952))
+        let planLanded = await waitWithTimeout(seconds: 30) { store.planVersion == 1 }
+        let expectedName = "Hyperfast charge laadpalen Nossegem Zaventem"
+        let stopName = store.plan?.stops.first?.name ?? "<none>"
+        let stopCountOK = store.plan?.stops.count == 1
+        let nameOK = stopName == expectedName
+        report(
+            "plan-landed", planLanded && stopCountOK && nameOK,
+            planLanded ? "stops=\(store.plan?.stops.count ?? -1) name=\"\(stopName)\"" : "planVersion never reached 1"
+        )
+        ok = ok && planLanded && stopCountOK && nameOK
+        guard let plan = store.plan else { await finish(ok: false, sleepSeconds: 8) }
+
+        // "stop-distance": cross-check the derived dist-from-start against the SoC curve's own
+        // post-charge jump -- the (single) run of consecutive samples where soc increases.
+        let stops = ChargingStopVM.stops(from: plan)
+        let stopDistFromStartM = stops.first?.distFromStartM ?? -1
+        let stopDistanceInRangeOK = stopDistFromStartM > 0 && stopDistFromStartM < plan.totalDistM
+
+        var jumpRunEndDistM: [Double] = []
+        var previousWasIncreasing = false
+        for i in 1..<plan.socCurve.count {
+            let prev = plan.socCurve[i - 1]
+            let curr = plan.socCurve[i]
+            if curr.soc > prev.soc {
+                if previousWasIncreasing {
+                    jumpRunEndDistM[jumpRunEndDistM.count - 1] = curr.distM
+                } else {
+                    jumpRunEndDistM.append(curr.distM)
+                }
+                previousWasIncreasing = true
+            } else {
+                previousWasIncreasing = false
+            }
+        }
+        let jumpDistM = jumpRunEndDistM.first ?? -1
+        let jumpMatchesOK = stops.count == 1 && stopDistanceInRangeOK
+            && jumpRunEndDistM.count == 1 && abs(jumpDistM - stopDistFromStartM) <= 2000
+        report(
+            "stop-distance", jumpMatchesOK,
+            "distFromStartM=\(stopDistFromStartM), jumpDistM=\(jumpDistM), totalDistM=\(plan.totalDistM)"
+        )
+        report("soc-jump-count", jumpRunEndDistM.count == 1, "expected 1, got \(jumpRunEndDistM.count)")
+        ok = ok && jumpMatchesOK && jumpRunEndDistM.count == 1
+
+        // "alternative-absent": the golden's ~16-min stop isn't a micro-stop, so no
+        // alternative despite offerStopFreeAlternative now defaulting to true.
+        let alternativeAbsentOK = plan.alternative == nil
+        report("alternative-absent", alternativeAbsentOK, "alternative=\(String(describing: plan.alternative))")
+        ok = ok && alternativeAbsentOK
+
+        // "scrub-marker": selecting the stop's own distance should land the nearest-fraction
+        // scrub marker on (or very near) the stop's own coordinate.
+        store.selectedDistanceM = stopDistFromStartM
+        let scrub = store.mapView.annotations?.first { $0.title == "Scrub" }
+        let stopCoordinate = stops.first?.coordinate
+        let scrubOK: Bool
+        if let scrub, let stopCoordinate {
+            scrubOK = abs(scrub.coordinate.latitude - stopCoordinate.latitude) <= 0.05
+                && abs(scrub.coordinate.longitude - stopCoordinate.longitude) <= 0.05
+        } else {
+            scrubOK = false
+        }
+        report("scrub-marker", scrubOK, scrub == nil ? "no scrub annotation found" : "\(scrub!.coordinate)")
+        ok = ok && scrubOK
+
+        // The 8s post-DONE window is when the external screenshot of the EXPANDED card
+        // (summary, chips, itinerary, SoC chart with the orange stop rule-mark) is taken.
+        store.cardExpanded = true
+        await finish(ok: ok, sleepSeconds: 8)
     }
 
     /// Polls `condition` every 100ms until it's true or `seconds` elapses.

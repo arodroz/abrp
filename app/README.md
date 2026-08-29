@@ -71,5 +71,9 @@ the golden plan adds the route + Charging Stop layers:
 xcrun simctl launch --console-pty booted org.anteras.wayfinder --autotest map-smoke
 ```
 
+Launching with `--autotest card-smoke` drives the result card's store state directly: the
+golden LU -> Amsterdam plan, the derived stop dist-from-start cross-checked against the SoC
+curve's post-charge jump, the (absent) stop-free alternative, and the SoC-chart scrub marker.
+
 Without a launch argument, the app starts normally and shows the map, centered on the
 Luxembourg corridor, with a small status overlay while the pack + planner load.

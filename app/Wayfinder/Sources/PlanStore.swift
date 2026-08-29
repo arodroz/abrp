@@ -3,7 +3,8 @@
 // PMTILES placeholder patch, the Chargers layer, route/stops layers, light/dark style swap,
 // camera fit) plus, for this ticket (search + route editor #40), the route-editor state
 // (origin/destination/Waypoints), the generation-guarded replan, and the CoreLocation
-// bootstrap. Skipped for later tickets: the SoC-scrub marker sync (arrival-card ticket).
+// bootstrap, and, for the arrival-card ticket (#43), the stop-free alternative toggle and the
+// SoC-scrub marker sync (ported from prototype/planner-ui's PlanStore.updateScrubMarker()).
 import CoreLocation
 import Foundation
 import MapLibre
@@ -80,14 +81,42 @@ final class PlanStore: NSObject, MLNMapViewDelegate, CLLocationManagerDelegate {
     var tempC = 20.0
     var headwindMs = 0.0
     var batteryWarmth = 1.0
-    var offerStopFreeAlternative = false
+    var offerStopFreeAlternative = true
     var vehicle: FfiVehicle = .ioniq5Lr2wd
     var referenceConsumptionWhPerKm: Double?
+
+    // MARK: Result card state (wayfinder #43)
+
+    /// Whether the result card shows the itinerary + SoC chart. Lives here, not as View
+    /// @State, so the card-smoke autotest can drive it directly.
+    var cardExpanded = false
+    /// Whether the stop-free alternative (ADR 0010 point 5) is displayed in place of the main
+    /// plan -- reset to false whenever a new plan lands. Toggle via `toggleAlternative()`.
+    private(set) var showingAlternative = false
+    /// Distance (m) selected by dragging on the SoC chart; moves `scrubAnnotation` on the map.
+    /// Cleared whenever a new plan lands or the alternative is toggled.
+    var selectedDistanceM: Double? {
+        didSet { updateScrubMarker() }
+    }
+
+    /// The plan the card, chart, scrub marker, and map route/stop layers all render: the main
+    /// plan, or, when `showingAlternative`, an `FfiPlan` built from `FfiPlanAlt`'s fields
+    /// (which are the same as `FfiPlan` minus `alternative`).
+    var displayedPlan: FfiPlan? {
+        guard let plan else { return nil }
+        guard showingAlternative, let alt = plan.alternative else { return plan }
+        return FfiPlan(
+            legs: alt.legs, stops: alt.stops, driveTimeS: alt.driveTimeS, chargeTimeS: alt.chargeTimeS,
+            totalTimeS: alt.totalTimeS, totalDistM: alt.totalDistM, flags: alt.flags,
+            socCurve: alt.socCurve, polyline: alt.polyline, alternative: nil
+        )
+    }
 
     private var generation = 0
     private var originOverridden = false
     private var hasSetOriginFromLocationFix = false
     private var originAnnotation: MLNPointAnnotation?
+    private var scrubAnnotation: MLNPointAnnotation?
     private let locationManager = CLLocationManager()
 
     private var client: PlannerClient?
@@ -182,6 +211,61 @@ final class PlanStore: NSObject, MLNMapViewDelegate, CLLocationManagerDelegate {
             RouteLayer.fitToRoute(mapView: mapView, plan: plan)
         }
         return plan
+    }
+
+    // MARK: Result card mutations (wayfinder #43)
+
+    /// Flips between the main plan and its stop-free alternative (ADR 0010 point 5). The
+    /// scrub selection doesn't carry over -- the two plans' SoC curves differ -- and the route
+    /// layers are redrawn from `displayedPlan` with no camera refit (Google Maps doesn't
+    /// re-fit for this either).
+    func toggleAlternative() {
+        showingAlternative.toggle()
+        selectedDistanceM = nil
+        if let style = mapView.style, let displayedPlan {
+            RouteLayer.addLayers(to: style, plan: displayedPlan)
+        }
+    }
+
+    /// Moves (or creates) the scrub marker: nearest socCurve sample by distance -> nearest
+    /// polyline point by walked (haversine) distance. Adapted from prototype/planner-ui's
+    /// PlanStore.updateScrubMarker(), which found the polyline point by fraction of total
+    /// distance instead -- that assumes the polyline's vertices are evenly spaced by distance,
+    /// which doesn't hold here: contraction-hierarchy shortcuts (wayfinder #31) unpack to
+    /// sparse geometry on highway stretches and dense geometry through cities, so a
+    /// uniform-fraction guess can land several km off the route. Walking real distance instead
+    /// keeps the approximation to the SoC curve's own ~2km sampling resolution, as intended.
+    private func updateScrubMarker() {
+        guard let plan = displayedPlan, let distM = selectedDistanceM,
+              !plan.socCurve.isEmpty, plan.polyline.count > 1, plan.totalDistM > 0
+        else {
+            if let scrubAnnotation { mapView.removeAnnotation(scrubAnnotation) }
+            scrubAnnotation = nil
+            return
+        }
+        let nearest = plan.socCurve.min { abs($0.distM - distM) < abs($1.distM - distM) }!
+
+        var accumulatedM = 0.0
+        var coordinate = CLLocationCoordinate2D(latitude: plan.polyline[0].lat, longitude: plan.polyline[0].lon)
+        for i in 1..<plan.polyline.count {
+            let previous = plan.polyline[i - 1]
+            let current = plan.polyline[i]
+            coordinate = CLLocationCoordinate2D(latitude: current.lat, longitude: current.lon)
+            accumulatedM += CLLocation(latitude: previous.lat, longitude: previous.lon)
+                .distance(from: CLLocation(latitude: current.lat, longitude: current.lon))
+            if accumulatedM >= nearest.distM { break }
+        }
+
+        if let scrubAnnotation {
+            scrubAnnotation.coordinate = coordinate
+        } else {
+            let annotation = MLNPointAnnotation()
+            annotation.coordinate = coordinate
+            annotation.title = "Scrub"
+            mapView.addAnnotation(annotation)
+            scrubAnnotation = annotation
+        }
+        mapView.setCenter(coordinate, animated: true)
     }
 
     // MARK: MLNMapViewDelegate
@@ -319,6 +403,8 @@ final class PlanStore: NSObject, MLNMapViewDelegate, CLLocationManagerDelegate {
                 let result = try await client.plan(request)
                 guard gen == self.generation else { return }
                 self.plan = result
+                showingAlternative = false
+                selectedDistanceM = nil
                 if let style = mapView.style {
                     RouteLayer.addLayers(to: style, plan: result)
                 }

@@ -1,7 +1,8 @@
-// The map surface (wayfinder #42) plus the search and route editor overlay (wayfinder #40):
-// the map is the root surface, full-screen, with the route editor card and search pill on
-// top, a locate-me button, a charger tap callout, and a toast for search/plan errors. The
-// result card/bottom sheet and settings are separate later tickets (#43, #44).
+// The map surface (wayfinder #42) plus the search and route editor overlay (wayfinder #40)
+// and the Plan result card (wayfinder #43): the map is the root surface, full-screen, with
+// the route editor card and search pill on top, a locate-me button, a charger tap callout,
+// and a toast for search/plan errors; the result card sits at the bottom once a plan exists,
+// below the locate-me button and charger callout. Settings are a separate later ticket (#44).
 import SwiftUI
 
 struct RootView: View {
@@ -53,6 +54,9 @@ struct RootView: View {
                     ChargerCalloutView(info: chargerCallout, onDismiss: { self.chargerCallout = nil })
                         .padding(.horizontal, 12)
                         .padding(.bottom, 8)
+                }
+                if store.plan != nil {
+                    ResultCard(store: store)
                 }
             }
         }
