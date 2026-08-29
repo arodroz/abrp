@@ -108,9 +108,16 @@ enum Autotest {
         exit(ok ? 0 : 1)
     }
 
+    /// The two direct-PlannerClient modes follow the active region (the store-driven modes
+    /// already do, via store.load()): the golden LU -> Amsterdam pins hold on any pack
+    /// covering the corridor -- proven bit-identical on eu-west at the pack-run QA.
+    private static var autotestRegion: String {
+        UserDefaults.standard.string(forKey: "activeRegion") ?? "corridor"
+    }
+
     private static func runPlanGolden() async {
-        guard let located = Packs.locate(region: "corridor") else {
-            report("pack-present", false, "Documents/corridor.rpack or corridor-chargers.json missing")
+        guard let located = Packs.locate(region: autotestRegion) else {
+            report("pack-present", false, "Documents/\(autotestRegion).rpack or -chargers.json missing")
             await finish(ok: false)
         }
         report("pack-present", true)
@@ -170,9 +177,10 @@ enum Autotest {
         let pmtilesSourcePresent = store.mapView.style?.source(withIdentifier: "protomaps") != nil
         report("pmtiles-source-present", pmtilesSourcePresent)
 
+        let expectedChargers = ["corridor": 1549, "eu-west": 40944, "lu-dev": 17][autotestRegion] ?? 1549
         let chargersReady = await waitWithTimeout(seconds: 15) { store.chargerCount > 0 }
-        let chargersOK = chargersReady && store.chargerCount == 1549
-        report("chargers-count", chargersOK, "expected 1549, got \(store.chargerCount)")
+        let chargersOK = chargersReady && store.chargerCount == expectedChargers
+        report("chargers-count", chargersOK, "expected \(expectedChargers), got \(store.chargerCount)")
 
         var ok = styleLoaded && pmtilesSourcePresent && chargersOK
 
@@ -508,8 +516,8 @@ enum Autotest {
     /// report healthy perf; the numbers themselves aren't asserted here -- they're
     /// environment-dependent (sim vs device) and the gate doc holds the verdicts.
     private static func runPerf() async {
-        guard let located = Packs.locate(region: "corridor") else {
-            report("pack-present", false, "Documents/corridor.rpack or corridor-chargers.json missing")
+        guard let located = Packs.locate(region: autotestRegion) else {
+            report("pack-present", false, "Documents/\(autotestRegion).rpack or -chargers.json missing")
             await finish(ok: false)
         }
         report("pack-present", true)

@@ -180,7 +180,11 @@ final class PackInstaller: NSObject {
             let stagedURL = stagingDir.appendingPathComponent(artifact.file)
             try await downloadArtifact(from: sourceURL, to: stagedURL, region: region)
 
-            let digest = try Self.sha256Hex(of: stagedURL)
+            // Off the main actor: hashing GBs takes seconds and must neither freeze the UI
+            // nor pile autoreleased chunks onto a runloop that never turns.
+            let digest = try await Task.detached(priority: .userInitiated) {
+                try Self.sha256Hex(of: stagedURL)
+            }.value
             guard digest == artifact.sha256 else {
                 throw PackInstallerError.checksumMismatch(kind: kind, expected: artifact.sha256, got: digest)
             }
@@ -303,14 +307,20 @@ final class PackInstaller: NSObject {
     }
 
     /// Streamed (CryptoKit), never loading the whole file into memory -- the Map Pack can be
-    /// GBs.
-    private static func sha256Hex(of url: URL) throws -> String {
+    /// GBs. Each read is drained in its own autorelease pool: `FileHandle.read` autoreleases
+    /// its chunk, and a GB-scale loop on a blocked runloop otherwise accumulates them all
+    /// (jetsam-killed the M3 gate's first eu-west install at the 4.37 GB rpack).
+    nonisolated private static func sha256Hex(of url: URL) throws -> String {
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
         var hasher = SHA256()
-        while let chunk = try handle.read(upToCount: 4 * 1024 * 1024), !chunk.isEmpty {
+        while try autoreleasepool(invoking: {
+            guard let chunk = try handle.read(upToCount: 4 * 1024 * 1024), !chunk.isEmpty else {
+                return false
+            }
             hasher.update(data: chunk)
-        }
+            return true
+        }) {}
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 }
