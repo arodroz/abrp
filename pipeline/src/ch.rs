@@ -10,14 +10,19 @@
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
+use std::time::Instant;
 
 use packs::{EdgeHot, RegionGraphModel};
 
 /// Witness-search settle cap: a local Dijkstra that has already settled this
 /// many nodes gives up and assumes no witness exists (conservative: may add
 /// an unnecessary shortcut, never drops a needed one down here since the
-/// through-cost cap below also bounds the search).
-const WITNESS_SETTLE_CAP: usize = 50;
+/// through-cost cap below also bounds the search). 50 was enough for the
+/// corridor but collapses at eu-west scale: with every core search capping
+/// out, unnecessary shortcuts densify the hierarchy top faster than it
+/// shrinks (37 M shortcuts and ~40 h projected on 11.4 M nodes). At 500 the
+/// searches find their witnesses and the core stays sparse.
+const WITNESS_SETTLE_CAP: usize = 500;
 
 /// Stats from one `ch_prepare` run.
 #[derive(Debug, Clone, Copy)]
@@ -266,6 +271,10 @@ pub fn ch_prepare(base: &RegionGraphModel) -> (RegionGraphModel, ChStats) {
         (priority, pending)
     }
 
+    let t0 = Instant::now();
+    let mut last_log = Instant::now();
+    let mut re_evals: u64 = 0;
+
     let mut heap: BinaryHeap<Reverse<(i64, u32)>> = BinaryHeap::new();
     for v in 0..n as u32 {
         let (p, _) = evaluate(
@@ -277,6 +286,15 @@ pub fn ch_prepare(base: &RegionGraphModel) -> (RegionGraphModel, ChStats) {
             &mut max_settled,
         );
         heap.push(Reverse((p, v)));
+        if last_log.elapsed().as_secs() >= 60 {
+            println!(
+                "[ch] ordering: {}/{} initial evaluations, {:.0}s",
+                v + 1,
+                n,
+                t0.elapsed().as_secs_f64()
+            );
+            last_log = Instant::now();
+        }
     }
 
     let mut rank = 0u32;
@@ -292,7 +310,21 @@ pub fn ch_prepare(base: &RegionGraphModel) -> (RegionGraphModel, ChStats) {
             v,
             &mut max_settled,
         );
+        if last_log.elapsed().as_secs() >= 60 {
+            println!(
+                "[ch] contraction: {}/{} nodes, heap {}, shortcuts {}, re-evals {}, max_settled {}, {:.0}s",
+                rank,
+                n,
+                heap.len(),
+                shortcuts.len(),
+                re_evals,
+                max_settled,
+                t0.elapsed().as_secs_f64()
+            );
+            last_log = Instant::now();
+        }
         if fresh > p {
+            re_evals += 1;
             heap.push(Reverse((fresh, v)));
             continue;
         }
