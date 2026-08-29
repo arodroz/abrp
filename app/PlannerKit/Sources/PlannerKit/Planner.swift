@@ -481,6 +481,22 @@ fileprivate struct FfiConverterUInt32: FfiConverterPrimitive {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterInt64: FfiConverterPrimitive {
+    typealias FfiType = Int64
+    typealias SwiftType = Int64
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Int64 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: Int64, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterDouble: FfiConverterPrimitive {
     typealias FfiType = Double
     typealias SwiftType = Double
@@ -594,9 +610,22 @@ fileprivate struct FfiConverterData: FfiConverterRustBuffer {
 public protocol PlannerProtocol: AnyObject, Sendable {
     
     /**
-     * Stubbed until Trip Logs (M4).
+     * Trip Log calibration (ADR 0009 points 3-5): each of `logs` is one
+     * tlog-1 file's full JSON text (Swift reads the files, ADR 0004
+     * division). Replays every eligible trip through the same per-edge
+     * physics `plan()` uses, refits Reference Consumption by the
+     * energy-weighted median ratio across trips, and reports SoC-points
+     * acceptance over the last up-to-10 qualifying (>= 100 km) trips. An
+     * unparseable log or one tagged with a format other than `"tlog-1"`
+     * fails the whole call; an eligible-but-unusable trip (wrong vehicle,
+     * too few samples, no net discharge, non-positive predicted energy)
+     * is excluded per-trip instead. `&self` only matches the coarse
+     * `Planner` surface Swift calls (ADR 0004 point 3) -- the pack plays
+     * no role, since replay needs only the Vehicle Model and each trip's
+     * own logged trace; the logic itself lives in `triplog::calibrate_of`
+     * so it's unit-testable without an Rpack.
      */
-    func calibrate() throws 
+    func calibrate(logs: [String], vehicle: FfiVehicle, referenceConsumptionWhPerKm: Double?) throws  -> FfiCalibrationResult
     
     /**
      * Sets the cancel flag `plan()` polls (ADR 0004 point 4); `plan()`
@@ -705,14 +734,31 @@ public convenience init(regionPackPath: String)throws  {
 
     
     /**
-     * Stubbed until Trip Logs (M4).
+     * Trip Log calibration (ADR 0009 points 3-5): each of `logs` is one
+     * tlog-1 file's full JSON text (Swift reads the files, ADR 0004
+     * division). Replays every eligible trip through the same per-edge
+     * physics `plan()` uses, refits Reference Consumption by the
+     * energy-weighted median ratio across trips, and reports SoC-points
+     * acceptance over the last up-to-10 qualifying (>= 100 km) trips. An
+     * unparseable log or one tagged with a format other than `"tlog-1"`
+     * fails the whole call; an eligible-but-unusable trip (wrong vehicle,
+     * too few samples, no net discharge, non-positive predicted energy)
+     * is excluded per-trip instead. `&self` only matches the coarse
+     * `Planner` surface Swift calls (ADR 0004 point 3) -- the pack plays
+     * no role, since replay needs only the Vehicle Model and each trip's
+     * own logged trace; the logic itself lives in `triplog::calibrate_of`
+     * so it's unit-testable without an Rpack.
      */
-open func calibrate()throws   {try rustCallWithError(FfiConverterTypePlannerError_lift) {
+open func calibrate(logs: [String], vehicle: FfiVehicle, referenceConsumptionWhPerKm: Double?)throws  -> FfiCalibrationResult  {
+    return try  FfiConverterTypeFfiCalibrationResult_lift(try rustCallWithError(FfiConverterTypePlannerError_lift) {
         uniffiCallStatus in
     uniffi_planner_ffi_fn_method_planner_calibrate(
-            self.uniffiCloneHandle(),uniffiCallStatus
+            self.uniffiCloneHandle(),
+        FfiConverterSequenceString.lower(logs),
+        FfiConverterTypeFfiVehicle_lower(vehicle),
+        FfiConverterOptionDouble.lower(referenceConsumptionWhPerKm),uniffiCallStatus
     )
-}
+})
 }
     
     /**
@@ -821,6 +867,97 @@ public func FfiConverterTypePlanner_lower(_ value: Planner) -> UInt64 {
 }
 
 
+
+
+/**
+ * `Planner::calibrate`'s result (ADR 0009 points 3-5).
+ */
+public struct FfiCalibrationResult: Equatable, Hashable {
+    /**
+     * The refit Reference Consumption: `current × median_ratio` (ADR 0009
+     * point 3).
+     */
+    public var referenceConsumptionWhPerKm: Double
+    public var medianRatio: Double
+    /**
+     * `true` when the last up-to-10 qualifying trips have max error
+     * `<= 3.0` points and mean absolute error `<= 2.0` points (ADR 0009
+     * point 4).
+     */
+    public var accepted: Bool
+    public var maePoints: Double?
+    public var maxErrorPoints: Double?
+    public var trips: [FfiTripFit]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * The refit Reference Consumption: `current × median_ratio` (ADR 0009
+         * point 3).
+         */referenceConsumptionWhPerKm: Double, medianRatio: Double, 
+        /**
+         * `true` when the last up-to-10 qualifying trips have max error
+         * `<= 3.0` points and mean absolute error `<= 2.0` points (ADR 0009
+         * point 4).
+         */accepted: Bool, maePoints: Double?, maxErrorPoints: Double?, trips: [FfiTripFit]) {
+        self.referenceConsumptionWhPerKm = referenceConsumptionWhPerKm
+        self.medianRatio = medianRatio
+        self.accepted = accepted
+        self.maePoints = maePoints
+        self.maxErrorPoints = maxErrorPoints
+        self.trips = trips
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiCalibrationResult: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiCalibrationResult: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiCalibrationResult {
+        return
+            try FfiCalibrationResult(
+                referenceConsumptionWhPerKm: FfiConverterDouble.read(from: &buf), 
+                medianRatio: FfiConverterDouble.read(from: &buf), 
+                accepted: FfiConverterBool.read(from: &buf), 
+                maePoints: FfiConverterOptionDouble.read(from: &buf), 
+                maxErrorPoints: FfiConverterOptionDouble.read(from: &buf), 
+                trips: FfiConverterSequenceTypeFfiTripFit.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiCalibrationResult, into buf: inout [UInt8]) {
+        FfiConverterDouble.write(value.referenceConsumptionWhPerKm, into: &buf)
+        FfiConverterDouble.write(value.medianRatio, into: &buf)
+        FfiConverterBool.write(value.accepted, into: &buf)
+        FfiConverterOptionDouble.write(value.maePoints, into: &buf)
+        FfiConverterOptionDouble.write(value.maxErrorPoints, into: &buf)
+        FfiConverterSequenceTypeFfiTripFit.write(value.trips, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiCalibrationResult_lift(_ buf: RustBuffer) throws -> FfiCalibrationResult {
+    return try FfiConverterTypeFfiCalibrationResult.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiCalibrationResult_lower(_ value: FfiCalibrationResult) -> RustBuffer {
+    return FfiConverterTypeFfiCalibrationResult.lower(value)
+}
 
 
 /**
@@ -1492,6 +1629,115 @@ public func FfiConverterTypeFfiStop_lower(_ value: FfiStop) -> RustBuffer {
 
 
 /**
+ * One Trip Log's fit result (ADR 0009 points 3-5), whether or not it was
+ * used: an excluded trip still gets a row (`used == false`,
+ * `excluded_reason` set), so the caller can show why.
+ */
+public struct FfiTripFit: Equatable, Hashable {
+    public var id: String
+    public var startUnix: Int64
+    public var distanceM: Double
+    public var actualWh: Double
+    public var predictedWh: Double
+    public var ratio: Double
+    public var used: Bool
+    /**
+     * `used && distance_m >= 100_000.0` -- only qualifying trips gate
+     * acceptance (ADR 0009 point 4).
+     */
+    public var qualifying: Bool
+    /**
+     * Post-refit `|predicted arrival SoC - actual arrival SoC|`, set for
+     * every used trip regardless of `qualifying` (cheap, and useful UX
+     * even for a trip too short to gate acceptance).
+     */
+    public var errorPoints: Double?
+    public var excludedReason: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: String, startUnix: Int64, distanceM: Double, actualWh: Double, predictedWh: Double, ratio: Double, used: Bool, 
+        /**
+         * `used && distance_m >= 100_000.0` -- only qualifying trips gate
+         * acceptance (ADR 0009 point 4).
+         */qualifying: Bool, 
+        /**
+         * Post-refit `|predicted arrival SoC - actual arrival SoC|`, set for
+         * every used trip regardless of `qualifying` (cheap, and useful UX
+         * even for a trip too short to gate acceptance).
+         */errorPoints: Double?, excludedReason: String?) {
+        self.id = id
+        self.startUnix = startUnix
+        self.distanceM = distanceM
+        self.actualWh = actualWh
+        self.predictedWh = predictedWh
+        self.ratio = ratio
+        self.used = used
+        self.qualifying = qualifying
+        self.errorPoints = errorPoints
+        self.excludedReason = excludedReason
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiTripFit: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiTripFit: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiTripFit {
+        return
+            try FfiTripFit(
+                id: FfiConverterString.read(from: &buf), 
+                startUnix: FfiConverterInt64.read(from: &buf), 
+                distanceM: FfiConverterDouble.read(from: &buf), 
+                actualWh: FfiConverterDouble.read(from: &buf), 
+                predictedWh: FfiConverterDouble.read(from: &buf), 
+                ratio: FfiConverterDouble.read(from: &buf), 
+                used: FfiConverterBool.read(from: &buf), 
+                qualifying: FfiConverterBool.read(from: &buf), 
+                errorPoints: FfiConverterOptionDouble.read(from: &buf), 
+                excludedReason: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiTripFit, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterInt64.write(value.startUnix, into: &buf)
+        FfiConverterDouble.write(value.distanceM, into: &buf)
+        FfiConverterDouble.write(value.actualWh, into: &buf)
+        FfiConverterDouble.write(value.predictedWh, into: &buf)
+        FfiConverterDouble.write(value.ratio, into: &buf)
+        FfiConverterBool.write(value.used, into: &buf)
+        FfiConverterBool.write(value.qualifying, into: &buf)
+        FfiConverterOptionDouble.write(value.errorPoints, into: &buf)
+        FfiConverterOptionString.write(value.excludedReason, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTripFit_lift(_ buf: RustBuffer) throws -> FfiTripFit {
+    return try FfiConverterTypeFfiTripFit.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTripFit_lower(_ value: FfiTripFit) -> RustBuffer {
+    return FfiConverterTypeFfiTripFit.lower(value)
+}
+
+
+/**
  * A user waypoint (ADR 0010 point 4).
  */
 public struct FfiWaypoint: Equatable, Hashable {
@@ -1645,11 +1891,6 @@ enum PlannerError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
      */
     case Cancelled(message: String
     )
-    /**
-     * Stubbed until Trip Logs (M4); see `Planner::calibrate`.
-     */
-    case Unimplemented(message: String
-    )
 
     
 
@@ -1691,9 +1932,6 @@ public struct FfiConverterTypePlannerError: FfiConverterRustBuffer {
         case 4: return .Cancelled(
             message: try FfiConverterString.read(from: &buf)
             )
-        case 5: return .Unimplemented(
-            message: try FfiConverterString.read(from: &buf)
-            )
 
          default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -1723,11 +1961,6 @@ public struct FfiConverterTypePlannerError: FfiConverterRustBuffer {
         
         case let .Cancelled(message):
             writeInt(&buf, Int32(4))
-            FfiConverterString.write(message, into: &buf)
-            
-        
-        case let .Unimplemented(message):
-            writeInt(&buf, Int32(5))
             FfiConverterString.write(message, into: &buf)
             
         }
@@ -1768,6 +2001,30 @@ fileprivate struct FfiConverterOptionDouble: FfiConverterRustBuffer {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterDouble.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
+    typealias SwiftType = String?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterString.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterString.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -1925,6 +2182,31 @@ fileprivate struct FfiConverterSequenceTypeFfiStop: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeFfiTripFit: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiTripFit]
+
+    public static func write(_ value: [FfiTripFit], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiTripFit.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiTripFit] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiTripFit]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFfiTripFit.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeFfiWaypoint: FfiConverterRustBuffer {
     typealias SwiftType = [FfiWaypoint]
 
@@ -1962,7 +2244,7 @@ private let initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
-    if (uniffi_planner_ffi_checksum_method_planner_calibrate() != 2754) {
+    if (uniffi_planner_ffi_checksum_method_planner_calibrate() != 19204) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_planner_ffi_checksum_method_planner_cancel() != 39409) {

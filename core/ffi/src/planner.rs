@@ -10,11 +10,11 @@ use routing::Router;
 
 use crate::error::PlannerError;
 use crate::mapping::{
-    build_polyline, build_soc_curve, calibrate_stub, calibration_of, corridor_request_of,
-    ffi_plan_alt_of, ffi_plan_of, map_assemble_error, plan_request_of, validate_cpack_format,
-    vehicle_of,
+    build_polyline, build_soc_curve, calibration_of, corridor_request_of, ffi_plan_alt_of,
+    ffi_plan_of, map_assemble_error, plan_request_of, validate_cpack_format, vehicle_of,
 };
-use crate::types::{FfiLegInput, FfiPlan, FfiPlanRequest};
+use crate::triplog::calibrate_of;
+use crate::types::{FfiCalibrationResult, FfiLegInput, FfiPlan, FfiPlanRequest, FfiVehicle};
 
 /// Interior mutability for the things that change after construction: the
 /// loaded Charger sites, the cross-call corridor cache (issue #38), and the
@@ -148,8 +148,26 @@ impl Planner {
         )
     }
 
-    /// Stubbed until Trip Logs (M4).
-    pub fn calibrate(&self) -> Result<(), PlannerError> {
-        calibrate_stub()
+    /// Trip Log calibration (ADR 0009 points 3-5): each of `logs` is one
+    /// tlog-1 file's full JSON text (Swift reads the files, ADR 0004
+    /// division). Replays every eligible trip through the same per-edge
+    /// physics `plan()` uses, refits Reference Consumption by the
+    /// energy-weighted median ratio across trips, and reports SoC-points
+    /// acceptance over the last up-to-10 qualifying (>= 100 km) trips. An
+    /// unparseable log or one tagged with a format other than `"tlog-1"`
+    /// fails the whole call; an eligible-but-unusable trip (wrong vehicle,
+    /// too few samples, no net discharge, non-positive predicted energy)
+    /// is excluded per-trip instead. `&self` only matches the coarse
+    /// `Planner` surface Swift calls (ADR 0004 point 3) -- the pack plays
+    /// no role, since replay needs only the Vehicle Model and each trip's
+    /// own logged trace; the logic itself lives in `triplog::calibrate_of`
+    /// so it's unit-testable without an Rpack.
+    pub fn calibrate(
+        &self,
+        logs: Vec<String>,
+        vehicle: FfiVehicle,
+        reference_consumption_wh_per_km: Option<f64>,
+    ) -> Result<FfiCalibrationResult, PlannerError> {
+        calibrate_of(&logs, vehicle, reference_consumption_wh_per_km)
     }
 }

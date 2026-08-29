@@ -7,13 +7,14 @@
 mod error;
 mod mapping;
 mod planner;
+mod triplog;
 mod types;
 
 pub use error::PlannerError;
 pub use planner::Planner;
 pub use types::{
-    FfiGeoPoint, FfiLeg, FfiLegInput, FfiPlan, FfiPlanAlt, FfiPlanRequest, FfiSocPoint, FfiStop,
-    FfiVehicle, FfiWaypoint,
+    FfiCalibrationResult, FfiGeoPoint, FfiLeg, FfiLegInput, FfiPlan, FfiPlanAlt, FfiPlanRequest,
+    FfiSocPoint, FfiStop, FfiTripFit, FfiVehicle, FfiWaypoint,
 };
 
 uniffi::setup_scaffolding!();

@@ -32,7 +32,29 @@ impl Default for Calibration {
 /// is validated against (research §3 row 3 / gate test 9).
 const REFERENCE_SPEED_KMH: f64 = 110.0;
 const REFERENCE_TEMP_C: f64 = 23.0;
-const REFERENCE_DISTANCE_M: f64 = 1000.0;
+pub(crate) const REFERENCE_DISTANCE_M: f64 = 1000.0;
+
+/// The Reference Consumption's fixed `Conditions`/`EdgeInput` (110 km/h,
+/// flat, no wind, 23 °C, 1 km) -- shared with `fit::reference_consumption_wh_per_km`
+/// so the "what is Reference Consumption" definition lives in exactly one
+/// place.
+pub(crate) fn reference_conditions_and_input() -> (Conditions, EdgeInput) {
+    (
+        Conditions {
+            temp_c: REFERENCE_TEMP_C,
+            headwind_ms: 0.0,
+            altitude_m: 0.0,
+        },
+        EdgeInput {
+            distance_m: REFERENCE_DISTANCE_M,
+            speed_kmh: REFERENCE_SPEED_KMH,
+            delta_v_kmh: 0.0,
+            ascent_m: 0.0,
+            descent_m: 0.0,
+            road_class: 0,
+        },
+    )
+}
 
 impl Calibration {
     /// Scales all three calibration scalars by the same factor so that
@@ -46,19 +68,7 @@ impl Calibration {
     /// whole prediction affine in `s`, which is solved directly against a
     /// `k=1` baseline.
     pub fn from_reference_consumption(vehicle: &VehicleModel, wh_per_km: f64) -> Self {
-        let cond = Conditions {
-            temp_c: REFERENCE_TEMP_C,
-            headwind_ms: 0.0,
-            altitude_m: 0.0,
-        };
-        let input = EdgeInput {
-            distance_m: REFERENCE_DISTANCE_M,
-            speed_kmh: REFERENCE_SPEED_KMH,
-            delta_v_kmh: 0.0,
-            ascent_m: 0.0,
-            descent_m: 0.0,
-            road_class: 0,
-        };
+        let (cond, input) = reference_conditions_and_input();
 
         // e(s) = baseline_fixed + s * baseline_scaled, both computed at k=0
         // and k=1 respectively so the affine coefficients fall out without

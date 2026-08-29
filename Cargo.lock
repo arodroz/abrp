@@ -382,6 +382,8 @@ dependencies = [
  "optimiser",
  "packs",
  "routing",
+ "serde",
+ "serde_json",
  "uniffi",
 ]
 

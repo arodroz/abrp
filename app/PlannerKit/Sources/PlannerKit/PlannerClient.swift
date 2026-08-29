@@ -34,7 +34,18 @@ public final class PlannerClient: Sendable {
         inner.energy(input: input)
     }
 
-    public func calibrate() throws {
-        try inner.calibrate()
+    /// Trip Log calibration (ADR 0009): each element of `logs` is one tlog-1
+    /// file's full JSON text -- reading the files stays on the Swift side
+    /// (ADR 0004 division). Detached like `plan()`: replaying multi-thousand-
+    /// sample traces is CPU-bound Rust work that doesn't belong on the main
+    /// actor.
+    public func calibrate(
+        logs: [String], vehicle: FfiVehicle, referenceConsumptionWhPerKm: Double?
+    ) async throws -> FfiCalibrationResult {
+        try await Task.detached { [inner] in
+            try inner.calibrate(
+                logs: logs, vehicle: vehicle,
+                referenceConsumptionWhPerKm: referenceConsumptionWhPerKm)
+        }.value
     }
 }

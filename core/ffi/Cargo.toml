@@ -23,6 +23,8 @@ packs = { path = "../packs" }
 routing = { path = "../routing" }
 energy = { path = "../energy" }
 optimiser = { path = "../optimiser" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 # Pinned exact (ADR 0004 point 6): the newest stable release on crates.io
 # at time of writing, and the version this repo's Mac build environment
 # (docs/research/dev-environment.md) already has installed.

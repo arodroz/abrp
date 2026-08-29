@@ -91,14 +91,6 @@ pub fn map_assemble_error(e: AssembleError) -> PlannerError {
     }
 }
 
-/// Stubbed until Trip Logs (M4); a free fn so the stub is unit-testable
-/// without a `Planner`/`Rpack`.
-pub fn calibrate_stub() -> Result<(), PlannerError> {
-    Err(PlannerError::Unimplemented {
-        message: "trip calibration lands with Trip Logs (M4)".to_string(),
-    })
-}
-
 fn endpoint_label(plan: &Plan, ep: &Endpoint) -> String {
     match ep {
         Endpoint::Origin => "Origin".to_string(),
@@ -340,14 +332,6 @@ mod tests {
         assert!(matches!(
             map_assemble_error(AssembleError::Cancelled),
             PlannerError::Cancelled { .. }
-        ));
-    }
-
-    #[test]
-    fn calibrate_stub_is_unimplemented() {
-        assert!(matches!(
-            calibrate_stub(),
-            Err(PlannerError::Unimplemented { .. })
         ));
     }
 

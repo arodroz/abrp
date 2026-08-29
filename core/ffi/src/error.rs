@@ -21,10 +21,6 @@ pub enum PlannerError {
     Cancelled {
         message: String,
     },
-    /// Stubbed until Trip Logs (M4); see `Planner::calibrate`.
-    Unimplemented {
-        message: String,
-    },
 }
 
 impl std::fmt::Display for PlannerError {
@@ -34,7 +30,6 @@ impl std::fmt::Display for PlannerError {
             PlannerError::InvalidRequest { message } => write!(f, "invalid request: {message}"),
             PlannerError::NoRouteFound { message } => write!(f, "no route found: {message}"),
             PlannerError::Cancelled { message } => write!(f, "cancelled: {message}"),
-            PlannerError::Unimplemented { message } => write!(f, "unimplemented: {message}"),
         }
     }
 }

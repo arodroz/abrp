@@ -121,6 +121,44 @@ pub struct FfiPlan {
     pub alternative: Option<FfiPlanAlt>,
 }
 
+/// One Trip Log's fit result (ADR 0009 points 3-5), whether or not it was
+/// used: an excluded trip still gets a row (`used == false`,
+/// `excluded_reason` set), so the caller can show why.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct FfiTripFit {
+    pub id: String,
+    pub start_unix: i64,
+    pub distance_m: f64,
+    pub actual_wh: f64,
+    pub predicted_wh: f64,
+    pub ratio: f64,
+    pub used: bool,
+    /// `used && distance_m >= 100_000.0` -- only qualifying trips gate
+    /// acceptance (ADR 0009 point 4).
+    pub qualifying: bool,
+    /// Post-refit `|predicted arrival SoC - actual arrival SoC|`, set for
+    /// every used trip regardless of `qualifying` (cheap, and useful UX
+    /// even for a trip too short to gate acceptance).
+    pub error_points: Option<f64>,
+    pub excluded_reason: Option<String>,
+}
+
+/// `Planner::calibrate`'s result (ADR 0009 points 3-5).
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct FfiCalibrationResult {
+    /// The refit Reference Consumption: `current × median_ratio` (ADR 0009
+    /// point 3).
+    pub reference_consumption_wh_per_km: f64,
+    pub median_ratio: f64,
+    /// `true` when the last up-to-10 qualifying trips have max error
+    /// `<= 3.0` points and mean absolute error `<= 2.0` points (ADR 0009
+    /// point 4).
+    pub accepted: bool,
+    pub mae_points: Option<f64>,
+    pub max_error_points: Option<f64>,
+    pub trips: Vec<FfiTripFit>,
+}
+
 /// `Planner::energy`'s input: one edge-shaped what-if (ADR 0004 point 3).
 #[derive(Debug, Clone, Copy, PartialEq, uniffi::Record)]
 pub struct FfiLegInput {

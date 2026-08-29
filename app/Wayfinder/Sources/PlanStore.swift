@@ -532,7 +532,6 @@ final class PlanStore: NSObject, @preconcurrency MLNMapViewDelegate, @preconcurr
         case .PackMissing: return "Planner not ready"
         case .InvalidRequest: return "Invalid route request"
         case .Cancelled: return "Cancelled"
-        case .Unimplemented: return "Not available yet"
         }
     }
 

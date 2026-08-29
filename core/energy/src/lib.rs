@@ -7,6 +7,7 @@ mod calibration;
 mod charging;
 mod conditions;
 mod edge;
+pub mod fit;
 mod vehicle;
 
 pub use calibration::Calibration;
