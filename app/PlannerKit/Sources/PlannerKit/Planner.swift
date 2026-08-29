@@ -586,9 +586,10 @@ fileprivate struct FfiConverterData: FfiConverterRustBuffer {
 
 
 /**
- * Interior mutability for the two things that change after construction:
- * the loaded Charger sites and the cancel flag (ADR 0004 point 4). The
- * open `Rpack` itself never mutates, so it needs no lock.
+ * Interior mutability for the things that change after construction: the
+ * loaded Charger sites, the cross-call corridor cache (issue #38), and the
+ * cancel flag (ADR 0004 point 4). The open `Rpack` itself never mutates, so
+ * it needs no lock.
  */
 public protocol PlannerProtocol: AnyObject, Sendable {
     
@@ -612,6 +613,9 @@ public protocol PlannerProtocol: AnyObject, Sendable {
     /**
      * Parses a Charger Pack (`format` must be `"cpack-1"`) and stores its
      * sites, replacing any previously loaded set. Returns the site count.
+     * Clears the corridor cache (issue #38): the charger set is a key
+     * assembly input but, unlike the rest, isn't cheap to compare on every
+     * `plan()` call, so a fresh load just invalidates outright.
      */
     func loadChargers(bytes: Data, format: String) throws  -> UInt32
     
@@ -625,9 +629,10 @@ public protocol PlannerProtocol: AnyObject, Sendable {
     
 }
 /**
- * Interior mutability for the two things that change after construction:
- * the loaded Charger sites and the cancel flag (ADR 0004 point 4). The
- * open `Rpack` itself never mutates, so it needs no lock.
+ * Interior mutability for the things that change after construction: the
+ * loaded Charger sites, the cross-call corridor cache (issue #38), and the
+ * cancel flag (ADR 0004 point 4). The open `Rpack` itself never mutates, so
+ * it needs no lock.
  */
 open class Planner: PlannerProtocol, @unchecked Sendable {
     fileprivate let handle: UInt64
@@ -741,6 +746,9 @@ open func energy(input: FfiLegInput) -> Double  {
     /**
      * Parses a Charger Pack (`format` must be `"cpack-1"`) and stores its
      * sites, replacing any previously loaded set. Returns the site count.
+     * Clears the corridor cache (issue #38): the charger set is a key
+     * assembly input but, unlike the rest, isn't cheap to compare on every
+     * `plan()` call, so a fresh load just invalidates outright.
      */
 open func loadChargers(bytes: Data, format: String)throws  -> UInt32  {
     return try  FfiConverterUInt32.lift(try rustCallWithError(FfiConverterTypePlannerError_lift) {
@@ -1965,7 +1973,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_planner_ffi_checksum_method_planner_energy() != 28779) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_planner_ffi_checksum_method_planner_load_chargers() != 11834) {
+    if (uniffi_planner_ffi_checksum_method_planner_load_chargers() != 29120) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_planner_ffi_checksum_method_planner_plan() != 65393) {
