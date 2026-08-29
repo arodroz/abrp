@@ -401,10 +401,10 @@ enum Autotest {
 
     /// Drives the settings sheet's store-bound fields directly (no UI-event injection exists
     /// on the sim; the sheet UI itself is verified by screenshot). Proves: the stop-free LU ->
-    /// Antwerp golden at the 0.90 default, the Capellen golden (with its exact 100 km/h Speed
-    /// Cap) after `departSoc` drops to 0.30, a genuinely different plan after a temperature
-    /// change (no pinned golden exists at -5 °C), and the appearance override actually
-    /// swapping the map style.
+    /// Antwerp golden at the 0.90 default, the depart-30 golden (with its Speed Cap
+    /// expectation) after `departSoc` drops to 0.30 -- both per-region, see
+    /// `depart30Goldens` -- a genuinely different plan after a temperature change (no pinned
+    /// golden exists at -5 °C), and the appearance override actually swapping the map style.
     @MainActor
     private static func runSettingsSmoke(store: PlanStore) async {
         // Pin the origin before anything else -- same determinism rationale as editor-smoke.
@@ -443,9 +443,13 @@ enum Autotest {
         )
         ok = ok && departPlanLanded && departGoldenOk
 
+        let expectedSpeedCapKmh = (depart30Goldens[autotestRegion] ?? depart30Goldens["corridor"]!).lastLegSpeedCapKmh
         let lastLegSpeedCapKmh = store.plan?.legs.last?.speedCapKmh
-        let speedCapOk = lastLegSpeedCapKmh == 100.0
-        report("speed-cap-100", speedCapOk, "expected 100.0, got \(String(describing: lastLegSpeedCapKmh))")
+        let speedCapOk = lastLegSpeedCapKmh == expectedSpeedCapKmh
+        report(
+            "speed-cap", speedCapOk,
+            "expected \(String(describing: expectedSpeedCapKmh)), got \(String(describing: lastLegSpeedCapKmh))"
+        )
         ok = ok && speedCapOk
 
         // Step 3: tempC = -5 re-assembles the corridor (~1s); no pinned golden exists at
@@ -486,22 +490,70 @@ enum Autotest {
         await finish(ok: ok, sleepSeconds: 8)
     }
 
-    /// Pinned observed values, LU -> Antwerp, depart 0.30 (matches
-    /// core/optimiser/tests/golden_corridor.rs's `golden_speed_cap_exercised`).
+    /// Per-region expectations for the depart-0.30 golden -- the richer eu-west charger set
+    /// yields a legitimately different optimal plan than the corridor pack.
+    private struct Depart30Golden {
+        let stopCount: Int
+        /// One name per expected stop, in order; only as many are checked as `stopCount` calls for.
+        let stopNames: [String]
+        let stopArrivalSoc: Double
+        let stopDepartSoc: Double
+        let chargeS: Double
+        let lastLegArrivalSoc: Double
+        let lastLegSpeedCapKmh: Double?
+    }
+
+    /// corridor matches core/optimiser/tests/golden_corridor.rs's `golden_speed_cap_exercised`;
+    /// eu-west values were pinned from the same request run against the eu-west pack
+    /// (wayfinder #50).
+    private static let depart30Goldens: [String: Depart30Golden] = [
+        "corridor": Depart30Golden(
+            stopCount: 1,
+            stopNames: ["SuperChargy - Aire de Capellen direction Arlon"],
+            stopArrivalSoc: 0.247,
+            stopDepartSoc: 0.800,
+            chargeS: 993,
+            lastLegArrivalSoc: 0.111,
+            lastLegSpeedCapKmh: 100.0
+        ),
+        "eu-west": Depart30Golden(
+            stopCount: 2,
+            stopNames: ["Ibis Styles - Arlon", "Hyperfast charge laadpalen Nossegem Zaventem"],
+            stopArrivalSoc: 0.186,
+            stopDepartSoc: 0.800,
+            chargeS: 955,
+            lastLegArrivalSoc: 0.150,
+            lastLegSpeedCapKmh: nil
+        ),
+    ]
+
+    /// Pinned observed values, LU -> Antwerp, depart 0.30, per active region -- see
+    /// `depart30Goldens` for provenance.
     private static func assertDepart30Golden(_ plan: FfiPlan) -> (Bool, String) {
+        let golden = depart30Goldens[autotestRegion] ?? depart30Goldens["corridor"]!
+
         var failures: [String] = []
-        if plan.stops.count != 1 { failures.append("stops.count=\(plan.stops.count), want 1") }
-        let stopName = plan.stops.first?.name ?? "<none>"
-        let expectedName = "SuperChargy - Aire de Capellen direction Arlon"
-        if stopName != expectedName { failures.append("stop name=\"\(stopName)\"") }
+        if plan.stops.count != golden.stopCount {
+            failures.append("stops.count=\(plan.stops.count), want \(golden.stopCount)")
+        }
+        for (index, expectedName) in golden.stopNames.enumerated() where index < plan.stops.count {
+            let stopName = plan.stops[index].name
+            if stopName != expectedName { failures.append("stop[\(index)] name=\"\(stopName)\"") }
+        }
         let stopArrivalSoc = plan.stops.first?.arrivalSoc ?? -1
-        if !isClose(stopArrivalSoc, 0.247, tol: 0.005) { failures.append("stop arrivalSoc=\(stopArrivalSoc)") }
+        if !isClose(stopArrivalSoc, golden.stopArrivalSoc, tol: 0.005) {
+            failures.append("stop arrivalSoc=\(stopArrivalSoc)")
+        }
         let stopDepartSoc = plan.stops.first?.departSoc ?? -1
-        if !isClose(stopDepartSoc, 0.800, tol: 0.005) { failures.append("stop departSoc=\(stopDepartSoc)") }
+        if !isClose(stopDepartSoc, golden.stopDepartSoc, tol: 0.005) {
+            failures.append("stop departSoc=\(stopDepartSoc)")
+        }
         let chargeS = plan.stops.first?.chargeS ?? -1
-        if !isClosePct(chargeS, 993, pct: 0.10) { failures.append("chargeS=\(chargeS)") }
+        if !isClosePct(chargeS, golden.chargeS, pct: 0.10) { failures.append("chargeS=\(chargeS)") }
         let lastLegArrivalSoc = plan.legs.last?.arrivalSoc ?? -1
-        if !isClose(lastLegArrivalSoc, 0.111, tol: 0.005) { failures.append("last leg arrivalSoc=\(lastLegArrivalSoc)") }
+        if !isClose(lastLegArrivalSoc, golden.lastLegArrivalSoc, tol: 0.005) {
+            failures.append("last leg arrivalSoc=\(lastLegArrivalSoc)")
+        }
         return (failures.isEmpty, failures.joined(separator: "; "))
     }
 

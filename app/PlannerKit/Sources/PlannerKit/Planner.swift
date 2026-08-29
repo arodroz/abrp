@@ -675,13 +675,11 @@ open class Planner: PlannerProtocol, @unchecked Sendable {
     }
     /**
      * Mmaps the Region Pack at `region_pack_path`. `Router` is deliberately
-     * NOT built here and cached: `routing::Router::new(&Rpack)` borrows the
-     * pack, and pairing an owned `Rpack` with a `Router` borrowing it in
-     * the same struct is self-referential. Rebuilding `Router` inside every
-     * `plan()` call instead (a one-off O(edges) precompute pass) avoids
-     * unsafe lifetime extension at the cost of tens of ms against the
-     * ~1s plan budget (ADR 0004 point 3) -- a deliberate, named perf lever
-     * if that ever needs revisiting.
+     * NOT built here and cached: `routing::Router` borrows the pack, and
+     * pairing an owned `Rpack` with a `Router` borrowing it in the same
+     * struct is self-referential. Instead its one expensive input
+     * (`from_of_edge`) is precomputed here, and each `plan()` builds a
+     * throwaway `Router` borrowing both -- construction is then O(1).
      */
 public convenience init(regionPackPath: String)throws  {
     let handle =
@@ -1979,7 +1977,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_planner_ffi_checksum_method_planner_plan() != 65393) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_planner_ffi_checksum_constructor_planner_new() != 23931) {
+    if (uniffi_planner_ffi_checksum_constructor_planner_new() != 33953) {
         return InitializationResult.apiChecksumMismatch
     }
 

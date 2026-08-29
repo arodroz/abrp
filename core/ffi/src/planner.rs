@@ -23,6 +23,10 @@ use crate::types::{FfiLegInput, FfiPlan, FfiPlanRequest};
 #[derive(uniffi::Object)]
 pub struct Planner {
     pack: Rpack,
+    /// `Router`'s per-edge `from` table, precomputed once here: rebuilding
+    /// it inside every `plan()` (an O(edges) pass allocating ~100 MB at
+    /// eu-west scale) was most of a warm plan's cost (issue #50).
+    from_of_edge: Vec<u32>,
     chargers: Mutex<Option<Vec<ChargerSite>>>,
     plan_cache: Mutex<PlanCache>,
     cancel_flag: AtomicBool,
@@ -31,20 +35,20 @@ pub struct Planner {
 #[uniffi::export]
 impl Planner {
     /// Mmaps the Region Pack at `region_pack_path`. `Router` is deliberately
-    /// NOT built here and cached: `routing::Router::new(&Rpack)` borrows the
-    /// pack, and pairing an owned `Rpack` with a `Router` borrowing it in
-    /// the same struct is self-referential. Rebuilding `Router` inside every
-    /// `plan()` call instead (a one-off O(edges) precompute pass) avoids
-    /// unsafe lifetime extension at the cost of tens of ms against the
-    /// ~1s plan budget (ADR 0004 point 3) -- a deliberate, named perf lever
-    /// if that ever needs revisiting.
+    /// NOT built here and cached: `routing::Router` borrows the pack, and
+    /// pairing an owned `Rpack` with a `Router` borrowing it in the same
+    /// struct is self-referential. Instead its one expensive input
+    /// (`from_of_edge`) is precomputed here, and each `plan()` builds a
+    /// throwaway `Router` borrowing both -- construction is then O(1).
     #[uniffi::constructor]
     pub fn new(region_pack_path: String) -> Result<Arc<Self>, PlannerError> {
         let pack = Rpack::open(&region_pack_path).map_err(|e| PlannerError::PackMissing {
             message: format!("failed to open region pack at {region_pack_path}: {e}"),
         })?;
+        let from_of_edge = Router::precompute_from_of_edge(&pack);
         Ok(Arc::new(Self {
             pack,
+            from_of_edge,
             chargers: Mutex::new(None),
             plan_cache: Mutex::new(PlanCache::new()),
             cancel_flag: AtomicBool::new(false),
@@ -89,7 +93,7 @@ impl Planner {
         let corridor = corridor_request_of(&request);
         let plan_request = plan_request_of(&request, corridor);
 
-        let router = Router::new(&self.pack);
+        let router = Router::with_from_of_edge(&self.pack, &self.from_of_edge);
         let mut cache = self.plan_cache.lock().expect("plan cache mutex poisoned");
         let (plan, _stats) = optimiser::plan_with_cache(
             &self.pack,

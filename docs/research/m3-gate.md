@@ -62,3 +62,17 @@ Install eu-west via Settings → Packs on a tailnet phone, then
 `devicectl device process launch --console ... --autotest perf` (three runs,
 discard the first after a fresh install). The store-driven modes reproduce the
 allocator abort. Autotest modes follow the persisted `activeRegion`.
+
+## Addendum (wayfinder #50)
+
+The diagnosis above located the scaling in the wrong place: candidate
+selection was already tight (78 kept of 40,944 at eu-west, near-identical to
+corridor's 76). The real cost was `Router::p2p` allocating and zero-filling
+six `vec![...; node_count]` state vectors PER QUERY — 91,313,632 bytes each
+for the `f64` ones at eu-west's 11.4 M nodes, the exact allocation that
+aborted — times ~1,550 leg-evaluation queries. After #50 (sparse per-query
+search state + `from_of_edge` precomputed once in the Planner): Mac cold
+6.28 s → 0.27 s, peak footprint 3.93 GB → 245 MB, warm 95 ms → 11 ms; sim
+at eu-west scale: cold-from-launch 0.36 s, footprint 482 MB, all seven
+autotest modes green. Routes are bit-identical (same traversal, sparse
+storage). Device numbers seal at the next unlock.

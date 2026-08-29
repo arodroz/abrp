@@ -2,8 +2,9 @@
 //! bucket-based many-to-many, both over a `&Rpack`'s baked CSR/reverse-CSR
 //! and `ch_order`.
 
+use std::borrow::Cow;
 use std::cmp::Reverse;
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, HashMap};
 
 use packs::{EdgeHot, Rpack, CH_MIDDLE_NODE_NONE};
 
@@ -42,23 +43,110 @@ fn edge_cost(e: &EdgeHot) -> f64 {
     e.length_m as f64 / e.speed_kmh as f64 * 3.6
 }
 
+/// One direction's search state for `p2p`, keyed sparsely by node id. A CH
+/// query settles a few thousand nodes out of millions, so dense per-query
+/// `vec![...; node_count]` state -- ~390 MB allocated and zero-filled PER
+/// QUERY at eu-west's 11.4 M nodes -- dominated both cold-plan time and the
+/// planner's memory ceiling (the M3 gate's 91,313,632-byte allocator abort
+/// was exactly one of those vectors). Sparse storage makes a query's cost
+/// track its search space; the traversal itself (pop order, float
+/// arithmetic, tie-breaking) is unchanged, so routes are bit-identical to
+/// the dense implementation's (issue #50).
+#[derive(Default)]
+struct SearchLabels {
+    map: HashMap<u32, NodeLabel>,
+}
+
+struct NodeLabel {
+    dist: f64,
+    settled: bool,
+    prev_edge: u32,
+}
+
+impl SearchLabels {
+    fn dist(&self, node: u32) -> f64 {
+        self.map.get(&node).map_or(f64::INFINITY, |l| l.dist)
+    }
+
+    fn is_settled(&self, node: u32) -> bool {
+        self.map.get(&node).is_some_and(|l| l.settled)
+    }
+
+    fn settle(&mut self, node: u32) {
+        self.map
+            .get_mut(&node)
+            .expect("settling a node that was never labelled")
+            .settled = true;
+    }
+
+    fn prev_edge(&self, node: u32) -> Option<u32> {
+        self.map.get(&node).map(|l| l.prev_edge)
+    }
+
+    /// Seeds the search origin: distance 0, no incoming edge.
+    fn seed(&mut self, node: u32) {
+        self.map.insert(
+            node,
+            NodeLabel {
+                dist: 0.0,
+                settled: false,
+                prev_edge: u32::MAX,
+            },
+        );
+    }
+
+    /// Relaxation write: records `dist`/`prev_edge` for `node`. Only called
+    /// when the caller has already established `dist < self.dist(node)`.
+    fn improve(&mut self, node: u32, dist: f64, prev_edge: u32) {
+        let label = self.map.entry(node).or_insert(NodeLabel {
+            dist,
+            settled: false,
+            prev_edge,
+        });
+        label.dist = dist;
+        label.prev_edge = prev_edge;
+    }
+}
+
 /// A CH query kernel over one open `Rpack`. Holds a precomputed `from` node
 /// per edge index (the pack stores only `target` per edge; `from` is
 /// recovered once from the forward CSR here rather than re-derived per
 /// query).
 pub struct Router<'a> {
     pack: &'a Rpack,
-    from_of_edge: Vec<u32>,
+    from_of_edge: Cow<'a, [u32]>,
 }
 
 impl<'a> Router<'a> {
     pub fn new(pack: &'a Rpack) -> Self {
+        Router {
+            pack,
+            from_of_edge: Cow::Owned(Self::precompute_from_of_edge(pack)),
+        }
+    }
+
+    /// The `from` node per edge index, recovered from the forward CSR. An
+    /// O(edges) pass allocating 4 bytes/edge (~100 MB at eu-west scale), so
+    /// a long-lived caller (the FFI `Planner`) computes it once and hands it
+    /// to [`Router::with_from_of_edge`] per query batch instead of paying it
+    /// inside every `Router::new` (issue #50).
+    pub fn precompute_from_of_edge(pack: &Rpack) -> Vec<u32> {
         let csr = pack.csr_first_edge();
         let mut from_of_edge = vec![0u32; pack.edges().len()];
         for (node, window) in csr.windows(2).enumerate() {
             from_of_edge[window[0] as usize..window[1] as usize].fill(node as u32);
         }
-        Router { pack, from_of_edge }
+        from_of_edge
+    }
+
+    /// As [`Router::new`], but borrowing a `from_of_edge` the caller already
+    /// computed via [`Router::precompute_from_of_edge`] for this same pack.
+    pub fn with_from_of_edge(pack: &'a Rpack, from_of_edge: &'a [u32]) -> Self {
+        debug_assert_eq!(from_of_edge.len(), pack.edges().len());
+        Router {
+            pack,
+            from_of_edge: Cow::Borrowed(from_of_edge),
+        }
     }
 
     /// Finds, among the edges leaving `from` that target `to`, the one with
@@ -112,15 +200,15 @@ impl<'a> Router<'a> {
     /// `dist_f[u] + w >= dist_f[v]` always holds and the check could never
     /// fire. Uses the pack's baked reverse CSR to find `v`'s incoming edges
     /// without a linear scan.
-    fn forward_is_stalled(&self, v: u32, dist_f: &[f64], ch_order: &[u32]) -> bool {
+    fn forward_is_stalled(&self, v: u32, labels_f: &SearchLabels, ch_order: &[u32]) -> bool {
         let Some(in_edges) = self.pack.reverse_edge_ids_for(v) else {
             return false;
         };
         in_edges.iter().any(|&idx| {
             let u = self.from_of_edge[idx as usize];
             ch_order[u as usize] > ch_order[v as usize]
-                && dist_f[u as usize] + edge_cost(&self.pack.edges()[idx as usize])
-                    < dist_f[v as usize]
+                && labels_f.dist(u) + edge_cost(&self.pack.edges()[idx as usize])
+                    < labels_f.dist(v)
         })
     }
 
@@ -134,7 +222,7 @@ impl<'a> Router<'a> {
     /// label via that unfollowed edge. Mirrors forward's use of the CSR
     /// opposite the one its own relaxation walks, with the same
     /// higher-rank-witness filter.
-    fn backward_is_stalled(&self, u: u32, dist_b: &[f64], ch_order: &[u32]) -> bool {
+    fn backward_is_stalled(&self, u: u32, labels_b: &SearchLabels, ch_order: &[u32]) -> bool {
         let Some(range) = self.pack.edge_range(u) else {
             return false;
         };
@@ -142,7 +230,7 @@ impl<'a> Router<'a> {
             let e = &self.pack.edges()[idx];
             let w = e.target;
             ch_order[w as usize] > ch_order[u as usize]
-                && dist_b[w as usize] + edge_cost(e) < dist_b[u as usize]
+                && labels_b.dist(w) + edge_cost(e) < labels_b.dist(u)
         })
     }
 
@@ -164,20 +252,15 @@ impl<'a> Router<'a> {
             });
         }
 
-        let n = self.pack.node_count();
         let ch_order = self.pack.ch_order();
 
-        let mut dist_f = vec![f64::INFINITY; n];
-        let mut dist_b = vec![f64::INFINITY; n];
-        let mut settled_f = vec![false; n];
-        let mut settled_b = vec![false; n];
-        let mut prev_edge_f: Vec<Option<u32>> = vec![None; n];
-        let mut prev_edge_b: Vec<Option<u32>> = vec![None; n];
+        let mut labels_f = SearchLabels::default();
+        let mut labels_b = SearchLabels::default();
 
         let mut heap_f: BinaryHeap<Reverse<HeapKey>> = BinaryHeap::new();
         let mut heap_b: BinaryHeap<Reverse<HeapKey>> = BinaryHeap::new();
-        dist_f[source as usize] = 0.0;
-        dist_b[target as usize] = 0.0;
+        labels_f.seed(source);
+        labels_b.seed(target);
         heap_f.push(Reverse(HeapKey(0.0, source)));
         heap_b.push(Reverse(HeapKey(0.0, target)));
 
@@ -195,11 +278,11 @@ impl<'a> Router<'a> {
 
             if can_f {
                 let Reverse(HeapKey(d, u)) = heap_f.pop().unwrap();
-                if !settled_f[u as usize] && d <= dist_f[u as usize] {
-                    settled_f[u as usize] = true;
-                    if !self.forward_is_stalled(u, &dist_f, ch_order) {
-                        if settled_b[u as usize] {
-                            let total = dist_f[u as usize] + dist_b[u as usize];
+                if !labels_f.is_settled(u) && d <= labels_f.dist(u) {
+                    labels_f.settle(u);
+                    if !self.forward_is_stalled(u, &labels_f, ch_order) {
+                        if labels_b.is_settled(u) {
+                            let total = labels_f.dist(u) + labels_b.dist(u);
                             if total < best {
                                 best = total;
                                 meeting = Some(u);
@@ -209,10 +292,9 @@ impl<'a> Router<'a> {
                             for idx in range {
                                 let e = &self.pack.edges()[idx];
                                 if ch_order[e.target as usize] > ch_order[u as usize] {
-                                    let nd = dist_f[u as usize] + edge_cost(e);
-                                    if nd < dist_f[e.target as usize] {
-                                        dist_f[e.target as usize] = nd;
-                                        prev_edge_f[e.target as usize] = Some(idx as u32);
+                                    let nd = labels_f.dist(u) + edge_cost(e);
+                                    if nd < labels_f.dist(e.target) {
+                                        labels_f.improve(e.target, nd, idx as u32);
                                         heap_f.push(Reverse(HeapKey(nd, e.target)));
                                     }
                                 }
@@ -224,11 +306,11 @@ impl<'a> Router<'a> {
 
             if can_b {
                 let Reverse(HeapKey(d, u)) = heap_b.pop().unwrap();
-                if !settled_b[u as usize] && d <= dist_b[u as usize] {
-                    settled_b[u as usize] = true;
-                    if !self.backward_is_stalled(u, &dist_b, ch_order) {
-                        if settled_f[u as usize] {
-                            let total = dist_f[u as usize] + dist_b[u as usize];
+                if !labels_b.is_settled(u) && d <= labels_b.dist(u) {
+                    labels_b.settle(u);
+                    if !self.backward_is_stalled(u, &labels_b, ch_order) {
+                        if labels_f.is_settled(u) {
+                            let total = labels_f.dist(u) + labels_b.dist(u);
                             if total < best {
                                 best = total;
                                 meeting = Some(u);
@@ -239,10 +321,9 @@ impl<'a> Router<'a> {
                                 let src = self.from_of_edge[idx as usize];
                                 if ch_order[src as usize] > ch_order[u as usize] {
                                     let e = &self.pack.edges()[idx as usize];
-                                    let nd = dist_b[u as usize] + edge_cost(e);
-                                    if nd < dist_b[src as usize] {
-                                        dist_b[src as usize] = nd;
-                                        prev_edge_b[src as usize] = Some(idx);
+                                    let nd = labels_b.dist(u) + edge_cost(e);
+                                    if nd < labels_b.dist(src) {
+                                        labels_b.improve(src, nd, idx);
                                         heap_b.push(Reverse(HeapKey(nd, src)));
                                     }
                                 }
@@ -259,7 +340,9 @@ impl<'a> Router<'a> {
         let mut forward_edges = Vec::new();
         let mut cur = meeting;
         while cur != source {
-            let idx = prev_edge_f[cur as usize].expect("meeting node is reachable from source");
+            let idx = labels_f
+                .prev_edge(cur)
+                .expect("meeting node is reachable from source");
             forward_edges.push(idx);
             cur = self.from_of_edge[idx as usize];
         }
@@ -269,7 +352,9 @@ impl<'a> Router<'a> {
         let mut backward_edges = Vec::new();
         let mut cur = meeting;
         while cur != target {
-            let idx = prev_edge_b[cur as usize].expect("meeting node reaches target");
+            let idx = labels_b
+                .prev_edge(cur)
+                .expect("meeting node reaches target");
             backward_edges.push(idx);
             cur = self.pack.edges()[idx as usize].target;
         }
