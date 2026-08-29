@@ -75,5 +75,10 @@ Launching with `--autotest card-smoke` drives the result card's store state dire
 golden LU -> Amsterdam plan, the derived stop dist-from-start cross-checked against the SoC
 curve's post-charge jump, the (absent) stop-free alternative, and the SoC-chart scrub marker.
 
+Launching with `--autotest settings-smoke` drives the settings sheet's store-bound fields
+directly: the stop-free LU -> Antwerp golden, the Capellen golden (with its 100 km/h Speed Cap)
+after `departSoc` drops to 0.30, a replan after a temperature change, and the appearance
+override swapping the map style.
+
 Without a launch argument, the app starts normally and shows the map, centered on the
 Luxembourg corridor, with a small status overlay while the pack + planner load.

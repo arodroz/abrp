@@ -4,7 +4,9 @@
 // camera fit) plus, for this ticket (search + route editor #40), the route-editor state
 // (origin/destination/Waypoints), the generation-guarded replan, and the CoreLocation
 // bootstrap, and, for the arrival-card ticket (#43), the stop-free alternative toggle and the
-// SoC-scrub marker sync (ported from prototype/planner-ui's PlanStore.updateScrubMarker()).
+// SoC-scrub marker sync (ported from prototype/planner-ui's PlanStore.updateScrubMarker()), and,
+// for the settings sheet (#44), didSet-triggered replans on every planner-affecting request
+// field plus the appearance override (the only setting that persists, to UserDefaults).
 import CoreLocation
 import Foundation
 import MapLibre
@@ -72,18 +74,60 @@ final class PlanStore: NSObject, MLNMapViewDelegate, CLLocationManagerDelegate {
     /// Bumped on every landed plan; RootView uses it to fit the camera.
     private(set) var planVersion = 0
 
-    // Fixed plan request defaults for this ticket (later tickets bind these to UI).
-    var departSoc = 0.90
-    var arrivalMinSoc = 0.10
-    var chargerArrivalMinSoc = 0.10
-    var chargerMaxSoc = 0.80
-    var stopsBias = 1.0
-    var tempC = 20.0
-    var headwindMs = 0.0
+    // Plan request fields, bound to the settings sheet (wayfinder #44). Each planner-affecting
+    // field replans on change via didSet, guarded against no-op sets so a continuous slider
+    // drag landing back on its own value doesn't fire a redundant replan.
+    var departSoc = 0.90 {
+        didSet { guard oldValue != departSoc else { return }; replan() }
+    }
+    var arrivalMinSoc = 0.10 {
+        didSet { guard oldValue != arrivalMinSoc else { return }; replan() }
+    }
+    var chargerArrivalMinSoc = 0.10 {
+        didSet { guard oldValue != chargerArrivalMinSoc else { return }; replan() }
+    }
+    var chargerMaxSoc = 0.80 {
+        didSet { guard oldValue != chargerMaxSoc else { return }; replan() }
+    }
+    var stopsBias = 1.0 {
+        didSet { guard oldValue != stopsBias else { return }; replan() }
+    }
+    var tempC = 20.0 {
+        didSet { guard oldValue != tempC else { return }; replan() }
+    }
+    var headwindMs = 0.0 {
+        didSet { guard oldValue != headwindMs else { return }; replan() }
+    }
     var batteryWarmth = 1.0
     var offerStopFreeAlternative = true
     var vehicle: FfiVehicle = .ioniq5Lr2wd
-    var referenceConsumptionWhPerKm: Double?
+    /// nil = vehicle default reference consumption; the settings sheet's Toggle sets/clears this.
+    var referenceConsumptionWhPerKm: Double? {
+        didSet { guard oldValue != referenceConsumptionWhPerKm else { return }; replan() }
+    }
+
+    // MARK: Settings sheet state (wayfinder #44)
+
+    /// Whether the settings sheet is presented. Lives here, not as View @State, so
+    /// settings-smoke can drive it directly, like `cardExpanded`.
+    var showingSettings = false
+
+    /// "system" / "light" / "dark", persisted to UserDefaults (read once at init) so it
+    /// survives relaunch -- the only setting in this ticket that persists (see PlanStore.swift
+    /// header). `updateAppearance(systemDark:)` combines it with the live system scheme.
+    var appearanceOverride: String {
+        didSet {
+            guard oldValue != appearanceOverride else { return }
+            UserDefaults.standard.set(appearanceOverride, forKey: Self.appearanceOverrideKey)
+            setAppearance(dark: effectiveDark)
+        }
+    }
+    private static let appearanceOverrideKey = "appearanceOverride"
+    /// The system color scheme as last reported by RootView's onChange(of: colorScheme).
+    private var systemIsDark = false
+    private var effectiveDark: Bool {
+        appearanceOverride == "dark" || (appearanceOverride == "system" && systemIsDark)
+    }
 
     // MARK: Result card state (wayfinder #43)
 
@@ -122,13 +166,16 @@ final class PlanStore: NSObject, MLNMapViewDelegate, CLLocationManagerDelegate {
     private var client: PlannerClient?
     private var located: Packs.Located?
     private var chargersForMap: [CPack1Charger]?
-    private var isDarkAppearance = false
+    // Read externally by settings-smoke (wayfinder #44) to check the effective appearance
+    // actually applied to the map, as distinct from the override setting alone.
+    private(set) var isDarkAppearance = false
     private var hasStartedLoad = false
     private var hasSetInitialCamera = false
 
     private let region = "corridor"
 
     override init() {
+        appearanceOverride = UserDefaults.standard.string(forKey: Self.appearanceOverrideKey) ?? "system"
         super.init()
         mapView.delegate = self
         mapView.showsUserLocation = true
@@ -177,9 +224,17 @@ final class PlanStore: NSObject, MLNMapViewDelegate, CLLocationManagerDelegate {
 
     // MARK: Appearance (light/dark style)
 
-    /// Called from RootView on appear and whenever the SwiftUI color scheme changes. Swaps
-    /// the map style only when the appearance actually changed; `didFinishLoading` re-adds
-    /// the chargers/route/stops layers once the new style finishes loading.
+    /// Called from RootView on appear and whenever the SwiftUI color scheme changes -- RootView
+    /// keeps reporting the system scheme; combined here with `appearanceOverride` (wayfinder
+    /// #44) into the effective appearance, applied through `setAppearance(dark:)`'s existing
+    /// no-op guard.
+    func updateAppearance(systemDark: Bool) {
+        systemIsDark = systemDark
+        setAppearance(dark: effectiveDark)
+    }
+
+    /// Swaps the map style only when the appearance actually changed; `didFinishLoading`
+    /// re-adds the chargers/route/stops layers once the new style finishes loading.
     func setAppearance(dark: Bool) {
         guard dark != isDarkAppearance else { return }
         isDarkAppearance = dark
@@ -192,6 +247,9 @@ final class PlanStore: NSObject, MLNMapViewDelegate, CLLocationManagerDelegate {
         guard let styleURL = MapStyle.patchedStyleURL(pmtilesURL: located.pmtilesURL, styleURL: styleFile) else {
             return
         }
+        // Reset so callers (settings-smoke) can wait on the false -> true transition to know
+        // the swapped style, not the previous one, has finished loading.
+        isStyleLoaded = false
         mapView.styleURL = styleURL
     }
 

@@ -48,6 +48,36 @@ extension ChargingStopVM {
     }
 }
 
+/// Stops Bias (CONTEXT.md): few-long / quickest / many-short, mapped to the planner's
+/// `stopsBias` request field (stop_penalty_s = 300 * stopsBias, core/optimiser/src/types.rs).
+/// Ported from prototype/planner-ui's PlannerModels.swift for the settings sheet (wayfinder
+/// #44); `init?(requestValue:)` recovers the case from PlanStore's stored Double for the
+/// sheet's segmented picker.
+enum StopsBias: String, CaseIterable, Identifiable {
+    case fewLong = "Few, long"
+    case quickest = "Quickest"
+    case manyShort = "Many, short"
+
+    var id: String { rawValue }
+
+    var requestValue: Double {
+        switch self {
+        case .fewLong: return 2.0
+        case .quickest: return 1.0
+        case .manyShort: return 0.4
+        }
+    }
+
+    init?(requestValue: Double) {
+        switch requestValue {
+        case 2.0: self = .fewLong
+        case 1.0: self = .quickest
+        case 0.4: self = .manyShort
+        default: return nil
+        }
+    }
+}
+
 func formatDuration(_ seconds: Double) -> String {
     let mins = Int((seconds / 60).rounded())
     let h = mins / 60

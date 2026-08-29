@@ -8,6 +8,10 @@
 // there's no UI-event injection on the sim, so the editor UI itself is
 // verified separately, by screenshot. `--autotest card-smoke` (wayfinder #43)
 // does the same for the result card + SoC chart + scrub marker.
+// `--autotest settings-smoke` (wayfinder #44) drives the settings sheet's
+// store-bound fields the same way: each field's own didSet IS the settings
+// path, so setting e.g. `store.departSoc` directly exercises exactly what
+// the sheet's Slider would trigger.
 import CoreLocation
 import Foundation
 import MapLibre
@@ -36,6 +40,10 @@ enum Autotest {
         case "card-smoke":
             Task.detached(priority: .userInitiated) {
                 await runCardSmoke(store: store)
+            }
+        case "settings-smoke":
+            Task.detached(priority: .userInitiated) {
+                await runSettingsSmoke(store: store)
             }
         default:
             break
@@ -364,6 +372,114 @@ enum Autotest {
         // (summary, chips, itinerary, SoC chart with the orange stop rule-mark) is taken.
         store.cardExpanded = true
         await finish(ok: ok, sleepSeconds: 8)
+    }
+
+    // MARK: settings-smoke
+
+    /// Drives the settings sheet's store-bound fields directly (no UI-event injection exists
+    /// on the sim; the sheet UI itself is verified by screenshot). Proves: the stop-free LU ->
+    /// Antwerp golden at the 0.90 default, the Capellen golden (with its exact 100 km/h Speed
+    /// Cap) after `departSoc` drops to 0.30, a genuinely different plan after a temperature
+    /// change (no pinned golden exists at -5 °C), and the appearance override actually
+    /// swapping the map style.
+    @MainActor
+    private static func runSettingsSmoke(store: PlanStore) async {
+        // Pin the origin before anything else -- same determinism rationale as editor-smoke.
+        store.setOrigin(CLLocationCoordinate2D(latitude: 49.6116, longitude: 6.1319))
+        store.load()
+
+        let ready = await waitWithTimeout(seconds: 30) { store.plannerStatus == .ready }
+        report("planner-ready", ready)
+        guard ready else { await finish(ok: false, sleepSeconds: 8) }
+
+        var ok = true
+
+        // Step 1: LU -> Antwerp at the 0.90 default -- stop-free.
+        store.setDestination(name: "Antwerp", coordinate: CLLocationCoordinate2D(latitude: 51.2194, longitude: 4.4025))
+        let firstPlanLanded = await waitWithTimeout(seconds: 30) { store.planVersion == 1 }
+        let stopFreeOk = store.plan.map { $0.stops.isEmpty && ($0.socCurve.last?.soc ?? -1) > 0.10 } ?? false
+        report(
+            "golden-antwerp-stop-free", firstPlanLanded && stopFreeOk,
+            firstPlanLanded
+                ? "stops=\(store.plan?.stops.count ?? -1) arrivalSoc=\(store.plan?.socCurve.last?.soc ?? -1)"
+                : "planVersion never reached 1"
+        )
+        ok = ok && firstPlanLanded && stopFreeOk
+
+        // Step 2: departSoc = 0.30 -- this didSet-triggered replan IS the settings path.
+        // Matches core/optimiser/tests/golden_corridor.rs's golden_speed_cap_exercised.
+        let versionBeforeDepartChange = store.planVersion
+        store.departSoc = 0.30
+        let departPlanLanded = await waitWithTimeout(seconds: 30) {
+            store.planVersion > versionBeforeDepartChange && !store.isPlanning
+        }
+        let (departGoldenOk, departDetail) = store.plan.map(assertDepart30Golden) ?? (false, "no plan")
+        report(
+            "golden-depart-30", departPlanLanded && departGoldenOk,
+            departPlanLanded ? departDetail : "plan never landed after departSoc change"
+        )
+        ok = ok && departPlanLanded && departGoldenOk
+
+        let lastLegSpeedCapKmh = store.plan?.legs.last?.speedCapKmh
+        let speedCapOk = lastLegSpeedCapKmh == 100.0
+        report("speed-cap-100", speedCapOk, "expected 100.0, got \(String(describing: lastLegSpeedCapKmh))")
+        ok = ok && speedCapOk
+
+        // Step 3: tempC = -5 re-assembles the corridor (~1s); no pinned golden exists at
+        // -5 °C, so this only checks that a genuinely different plan landed.
+        let recordedChargeTimeS = store.plan?.chargeTimeS ?? -1
+        let recordedTotalTimeS = store.plan?.totalTimeS ?? -1
+        let versionBeforeTempChange = store.planVersion
+        store.tempC = -5.0
+        let tempPlanLanded = await waitWithTimeout(seconds: 30) {
+            store.planVersion > versionBeforeTempChange && !store.isPlanning
+        }
+        let tempChangedOk = tempPlanLanded && (
+            (store.plan?.chargeTimeS ?? -1) != recordedChargeTimeS
+                || (store.plan?.totalTimeS ?? -1) != recordedTotalTimeS
+        )
+        report(
+            "temp-replans", tempChangedOk,
+            tempPlanLanded
+                ? "chargeTimeS=\(store.plan?.chargeTimeS ?? -1) totalTimeS=\(store.plan?.totalTimeS ?? -1)"
+                : "plan never landed after tempC change"
+        )
+        ok = ok && tempChangedOk
+
+        // Step 4: the appearance override actually swaps the map style -- isStyleLoaded flips
+        // false -> true across the swap (PlanStore.applyStyle resets it before the reload).
+        store.appearanceOverride = "dark"
+        let styleReloaded = await waitWithTimeout(seconds: 15) { store.isStyleLoaded }
+        let appearanceOk = styleReloaded && store.isDarkAppearance
+        report(
+            "appearance-override", appearanceOk,
+            "isStyleLoaded=\(store.isStyleLoaded) isDarkAppearance=\(store.isDarkAppearance)"
+        )
+        ok = ok && appearanceOk
+
+        // The 8s post-DONE window is when the external screenshot of the OPEN settings sheet
+        // (medium detent) over the dark-styled map is taken.
+        store.showingSettings = true
+        await finish(ok: ok, sleepSeconds: 8)
+    }
+
+    /// Pinned observed values, LU -> Antwerp, depart 0.30 (matches
+    /// core/optimiser/tests/golden_corridor.rs's `golden_speed_cap_exercised`).
+    private static func assertDepart30Golden(_ plan: FfiPlan) -> (Bool, String) {
+        var failures: [String] = []
+        if plan.stops.count != 1 { failures.append("stops.count=\(plan.stops.count), want 1") }
+        let stopName = plan.stops.first?.name ?? "<none>"
+        let expectedName = "SuperChargy - Aire de Capellen direction Arlon"
+        if stopName != expectedName { failures.append("stop name=\"\(stopName)\"") }
+        let stopArrivalSoc = plan.stops.first?.arrivalSoc ?? -1
+        if !isClose(stopArrivalSoc, 0.247, tol: 0.005) { failures.append("stop arrivalSoc=\(stopArrivalSoc)") }
+        let stopDepartSoc = plan.stops.first?.departSoc ?? -1
+        if !isClose(stopDepartSoc, 0.800, tol: 0.005) { failures.append("stop departSoc=\(stopDepartSoc)") }
+        let chargeS = plan.stops.first?.chargeS ?? -1
+        if !isClosePct(chargeS, 993, pct: 0.10) { failures.append("chargeS=\(chargeS)") }
+        let lastLegArrivalSoc = plan.legs.last?.arrivalSoc ?? -1
+        if !isClose(lastLegArrivalSoc, 0.111, tol: 0.005) { failures.append("last leg arrivalSoc=\(lastLegArrivalSoc)") }
+        return (failures.isEmpty, failures.joined(separator: "; "))
     }
 
     /// Polls `condition` every 100ms until it's true or `seconds` elapses.

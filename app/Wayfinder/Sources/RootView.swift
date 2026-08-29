@@ -1,8 +1,11 @@
-// The map surface (wayfinder #42) plus the search and route editor overlay (wayfinder #40)
-// and the Plan result card (wayfinder #43): the map is the root surface, full-screen, with
-// the route editor card and search pill on top, a locate-me button, a charger tap callout,
-// and a toast for search/plan errors; the result card sits at the bottom once a plan exists,
-// below the locate-me button and charger callout. Settings are a separate later ticket (#44).
+// The map surface (wayfinder #42) plus the search and route editor overlay (wayfinder #40),
+// the Plan result card (wayfinder #43), and the settings sheet (wayfinder #44): the map is the
+// root surface, full-screen, with the route editor card and search pill on top, a locate-me
+// button, a charger tap callout, and a toast for search/plan errors; the result card sits at
+// the bottom once a plan exists, below the locate-me button and charger callout. A gear button
+// mirrors locate-me on the opposite (bottom-left) corner, presenting the settings sheet over
+// the still-visible map. Appearance combines the system color scheme (reported here, on every
+// change) with PlanStore's persisted override via `updateAppearance(systemDark:)`.
 import SwiftUI
 
 struct RootView: View {
@@ -45,6 +48,7 @@ struct RootView: View {
             VStack {
                 Spacer()
                 HStack {
+                    settingsButton
                     Spacer()
                     locateMeButton
                 }
@@ -61,12 +65,12 @@ struct RootView: View {
             }
         }
         .onAppear {
-            store.setAppearance(dark: colorScheme == .dark)
+            store.updateAppearance(systemDark: colorScheme == .dark)
             store.load()
             store.requestLocationPermission()
         }
         .onChange(of: colorScheme) { _, newValue in
-            store.setAppearance(dark: newValue == .dark)
+            store.updateAppearance(systemDark: newValue == .dark)
         }
         .onChange(of: store.planVersion) { _, _ in
             if let plan = store.plan {
@@ -75,6 +79,10 @@ struct RootView: View {
         }
         .onChange(of: store.planErrorVersion) { _, _ in
             if let message = store.planErrorMessage { showToast(message) }
+        }
+        .sheet(isPresented: Binding(get: { store.showingSettings }, set: { store.showingSettings = $0 })) {
+            SettingsForm(store: store)
+                .presentationDetents([.medium, .large])
         }
     }
 
@@ -114,6 +122,19 @@ struct RootView: View {
             store.centerOnUser()
         } label: {
             Image(systemName: "location.fill")
+                .font(.headline)
+                .foregroundColor(.blue)
+                .frame(width: 44, height: 44)
+                .background(.regularMaterial, in: Circle())
+                .shadow(color: .black.opacity(0.2), radius: 4, y: 2)
+        }
+    }
+
+    private var settingsButton: some View {
+        Button {
+            store.showingSettings = true
+        } label: {
+            Image(systemName: "gearshape.fill")
                 .font(.headline)
                 .foregroundColor(.blue)
                 .frame(width: 44, height: 44)
