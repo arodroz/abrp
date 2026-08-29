@@ -11,8 +11,11 @@
 // `--autotest settings-smoke` (wayfinder #44) drives the settings sheet's
 // store-bound fields the same way: each field's own didSet IS the settings
 // path, so setting e.g. `store.departSoc` directly exercises exactly what
-// the sheet's Slider would trigger.
+// the sheet's Slider would trigger. `--autotest perf` (wayfinder #45) measures
+// the ADR 0001 M2 gate numbers -- cold-start/plan latency/memory -- through
+// PlannerClient directly, like plan-golden.
 import CoreLocation
+import Darwin
 import Foundation
 import MapLibre
 import PlannerKit
@@ -44,6 +47,10 @@ enum Autotest {
         case "settings-smoke":
             Task.detached(priority: .userInitiated) {
                 await runSettingsSmoke(store: store)
+            }
+        case "perf":
+            Task.detached(priority: .userInitiated) {
+                await runPerf()
             }
         default:
             break
@@ -480,6 +487,87 @@ enum Autotest {
         let lastLegArrivalSoc = plan.legs.last?.arrivalSoc ?? -1
         if !isClose(lastLegArrivalSoc, 0.111, tol: 0.005) { failures.append("last leg arrivalSoc=\(lastLegArrivalSoc)") }
         return (failures.isEmpty, failures.joined(separator: "; "))
+    }
+
+    // MARK: perf
+
+    /// `--autotest perf` (wayfinder #45) measures what the ADR 0001 M2 gate checks:
+    /// cold-start -> first-plan, cold vs warm plan() latency, the departSoc-only replan the
+    /// cross-call corridor cache (#38) exists for, and resident memory after the three
+    /// plans. Routed through PlannerClient directly, like plan-golden -- no map/store,
+    /// keeping the measurement clean of MapLibre. Golden shape asserts (the same LU ->
+    /// Amsterdam pins as plan-golden) guard the cold and warm plans so a broken plan can't
+    /// report healthy perf; the numbers themselves aren't asserted here -- they're
+    /// environment-dependent (sim vs device) and the gate doc holds the verdicts.
+    private static func runPerf() async {
+        guard let located = Packs.locate(region: "corridor") else {
+            report("pack-present", false, "Documents/corridor.rpack or corridor-chargers.json missing")
+            await finish(ok: false)
+        }
+        report("pack-present", true)
+
+        var ok = true
+        do {
+            let client = try PlannerClient(regionPackPath: located.rpackURL.path)
+            let chargerBytes = try Data(contentsOf: located.chargersURL)
+            try client.loadChargers(bytes: chargerBytes, format: "cpack-1")
+            report("chargers-loaded", true)
+
+            let coldStart = DispatchTime.now()
+            let coldPlan = try await client.plan(goldenRequest())
+            let coldElapsedMs = Double(DispatchTime.now().uptimeNanoseconds - coldStart.uptimeNanoseconds) / 1_000_000
+            let coldFromLaunchMs = (ProcessInfo.processInfo.systemUptime - WayfinderApp.launchUptime) * 1000
+            print("WAYFINDER-AUTOTEST: perf cold_from_launch_ms=\(String(format: "%.1f", coldFromLaunchMs))")
+            print("WAYFINDER-AUTOTEST: perf plan_cold_ms=\(String(format: "%.1f", coldElapsedMs))")
+
+            let (coldGoldenOk, coldGoldenDetail) = assertLuAmsterdamGolden(coldPlan)
+            report("golden-cold", coldGoldenOk, coldGoldenDetail)
+            ok = ok && coldGoldenOk
+
+            let warmStart = DispatchTime.now()
+            let warmPlan = try await client.plan(goldenRequest())
+            let warmElapsedMs = Double(DispatchTime.now().uptimeNanoseconds - warmStart.uptimeNanoseconds) / 1_000_000
+            print("WAYFINDER-AUTOTEST: perf plan_warm_ms=\(String(format: "%.1f", warmElapsedMs))")
+
+            let (warmGoldenOk, warmGoldenDetail) = assertLuAmsterdamGolden(warmPlan)
+            report("golden-warm", warmGoldenOk, warmGoldenDetail)
+            ok = ok && warmGoldenOk
+
+            // Only departSoc changes -- the cross-call corridor cache (#38) should skip
+            // assembly and go straight to search::solve (matches core/ffi/plan_cli.rs's
+            // "warm soc=0.85" measurement). No pinned golden exists at this departSoc.
+            var socRequest = goldenRequest()
+            socRequest.departSoc = 0.85
+            let socStart = DispatchTime.now()
+            _ = try await client.plan(socRequest)
+            let socElapsedMs = Double(DispatchTime.now().uptimeNanoseconds - socStart.uptimeNanoseconds) / 1_000_000
+            print("WAYFINDER-AUTOTEST: perf replan_soc_ms=\(String(format: "%.1f", socElapsedMs))")
+
+            let footprintMB = physFootprintMB()
+            print("WAYFINDER-AUTOTEST: perf phys_footprint_mb=\(String(format: "%.1f", footprintMB))")
+        } catch {
+            report("plan", false, "\(error)")
+            ok = false
+        }
+
+        await finish(ok: ok)
+    }
+
+    /// `task_vm_info.phys_footprint` via `task_info` -- the same figure Xcode's memory gauge
+    /// reports. Ported from the prototype flyover benchmark's memory probe (`git show
+    /// prototype/planner-ui:prototype/ios/SliceProto/BenchmarkFlyover.swift`); its
+    /// CADisplayLink fps sampling and camera flyover aren't ported -- fps isn't an ADR 0001
+    /// bar.
+    private static func physFootprintMB() -> Double {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size)
+        let kr: kern_return_t = withUnsafeMutablePointer(to: &info) { ptr -> kern_return_t in
+            ptr.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { intPtr in
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), intPtr, &count)
+            }
+        }
+        guard kr == KERN_SUCCESS else { return 0 }
+        return Double(info.phys_footprint) / 1_048_576.0
     }
 
     /// Polls `condition` every 100ms until it's true or `seconds` elapses.

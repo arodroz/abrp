@@ -80,5 +80,9 @@ directly: the stop-free LU -> Antwerp golden, the Capellen golden (with its 100 
 after `departSoc` drops to 0.30, a replan after a temperature change, and the appearance
 override swapping the map style.
 
+Launching with `--autotest perf` measures the ADR 0001 M2 gate numbers -- cold-start ->
+first-plan, cold/warm/departSoc-replan `plan()` latency, and `phys_footprint` memory --
+through `PlannerClient` directly, guarded by the same golden shape asserts as plan-golden.
+
 Without a launch argument, the app starts normally and shows the map, centered on the
 Luxembourg corridor, with a small status overlay while the pack + planner load.
