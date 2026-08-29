@@ -18,11 +18,19 @@
 // hosted catalog: fetches the index, installs the small lu-dev region (a
 // real ~49MB download), opens a PlannerClient on the installed rpack and
 // parses its Charger Pack, then deletes the region and checks cleanup.
+// After that live-network part, it runs the codebase-audit remediation
+// checks (docs/codebase-audit-2026-08-29.md H-01/H-03/M-01/M-02) offline,
+// with synthetic files: journal roll-forward, an unrecoverable journal,
+// catalog validator rejections (including the audit's own path-traversal
+// proof), and the M-01 needs-repair row flag. Keeping the live part first
+// means an offline failure in the new checks is never confused with a
+// network-dependent one.
 // `--autotest triplog-smoke` (wayfinder #51) drives TripLogStore's capture
 // lifecycle directly -- there's no location-fix injection on the sim, so
 // synthetic CLLocations are fed straight to `ingest` -- and verifies the
 // saved tlog-1 JSON against the schema #52's Rust `calibrate()` will parse.
 import CoreLocation
+import CryptoKit
 import Darwin
 import Foundation
 import MapLibre
@@ -729,7 +737,183 @@ enum Autotest {
         )
         ok = ok && deletedFilesGone && recordGone && stylesRemain
 
+        ok = await runInstallReconciliationAndValidationChecks(installer: installer, docs: docs) && ok
+
         await finish(ok: ok)
+    }
+
+    /// Codebase-audit remediation checks (docs/codebase-audit-2026-08-29.md), all offline: no
+    /// network, no new PackInstaller instance (a second background URLSession with the same
+    /// identifier as the app's own would be a problem) -- reuses the one already passed in.
+    @MainActor
+    private static func runInstallReconciliationAndValidationChecks(installer: PackInstaller, docs: URL) async -> Bool {
+        var ok = true
+
+        // -- H-01: journal roll-forward -- a staged file + journal survive a simulated crash;
+        // reconcileJournal should finish the commit: move the file into place, write the
+        // record, and clean up the journal.
+        let forwardRegion = "autotest-journal-forward"
+        let forwardEpoch = 1
+        let forwardFile = "\(forwardRegion).rpack"
+        let forwardContent = Data("autotest journal roll-forward content".utf8)
+        let forwardSha256 = SHA256.hash(data: forwardContent).map { String(format: "%02x", $0) }.joined()
+        let forwardStagingDir = PackInstaller.stagingDirURL(docs: docs, region: forwardRegion, epoch: forwardEpoch)
+        let forwardDestURL = docs.appendingPathComponent(forwardFile)
+        let forwardRecordURL = docs.appendingPathComponent("installed-\(forwardRegion).json")
+        try? FileManager.default.createDirectory(at: forwardStagingDir, withIntermediateDirectories: true)
+        try? forwardContent.write(to: forwardStagingDir.appendingPathComponent(forwardFile))
+        try? FileManager.default.removeItem(at: forwardDestURL)
+        try? FileManager.default.removeItem(at: forwardRecordURL)
+        let forwardRecord = InstalledRecord(
+            regionId: forwardRegion, epoch: forwardEpoch,
+            artifacts: ["region_pack": InstalledArtifactRecord(file: forwardFile, sha256: forwardSha256)]
+        )
+        let forwardJournal = CommitJournal(
+            regionId: forwardRegion, epoch: forwardEpoch,
+            entries: [CommitJournalEntry(stagedFile: forwardFile, destinationFile: forwardFile, sha256: forwardSha256)],
+            record: forwardRecord
+        )
+        try? JSONEncoder().encode(forwardJournal).write(to: PackInstaller.journalURL(docs: docs, region: forwardRegion))
+
+        PackInstaller.reconcileJournal(region: forwardRegion, documentsURL: docs)
+
+        let forwardFileLanded = (try? Data(contentsOf: forwardDestURL)) == forwardContent
+        let forwardRecordWritten = PackInstaller.loadRecord(region: forwardRegion) == forwardRecord
+        let forwardJournalGone = !FileManager.default.fileExists(
+            atPath: PackInstaller.journalURL(docs: docs, region: forwardRegion).path
+        )
+        let forwardOk = forwardFileLanded && forwardRecordWritten && forwardJournalGone
+        report(
+            "reconcile-journal-roll-forward", forwardOk,
+            "fileLanded=\(forwardFileLanded) recordWritten=\(forwardRecordWritten) journalGone=\(forwardJournalGone)"
+        )
+        ok = ok && forwardOk
+        try? FileManager.default.removeItem(at: forwardDestURL)
+        try? FileManager.default.removeItem(at: forwardRecordURL)
+
+        // -- H-01: unrecoverable journal -- the staged file is gone AND the destination
+        // doesn't sha-match the journal (simulating a crash after the staged copy was
+        // consumed some other way, or a transfer that never actually landed). reconcileJournal
+        // must abandon the transaction: old file + old record untouched, journal cleaned up.
+        let badRegion = "autotest-journal-unrecoverable"
+        let badEpoch = 1
+        let badFile = "\(badRegion).rpack"
+        let badStagingDir = PackInstaller.stagingDirURL(docs: docs, region: badRegion, epoch: badEpoch)
+        let badDestURL = docs.appendingPathComponent(badFile)
+        let badRecordURL = docs.appendingPathComponent("installed-\(badRegion).json")
+        try? FileManager.default.createDirectory(at: badStagingDir, withIntermediateDirectories: true)
+        // No staged file is written -- it's "gone".
+        let oldContent = Data("old install, still here".utf8)
+        try? oldContent.write(to: badDestURL)
+        let bogusSha256 = String(repeating: "0", count: 64)
+        let oldRecord = InstalledRecord(regionId: badRegion, epoch: 0, artifacts: [:])
+        try? JSONEncoder().encode(oldRecord).write(to: badRecordURL)
+        let badJournal = CommitJournal(
+            regionId: badRegion, epoch: badEpoch,
+            entries: [CommitJournalEntry(stagedFile: badFile, destinationFile: badFile, sha256: bogusSha256)],
+            record: InstalledRecord(
+                regionId: badRegion, epoch: badEpoch,
+                artifacts: ["region_pack": InstalledArtifactRecord(file: badFile, sha256: bogusSha256)]
+            )
+        )
+        try? JSONEncoder().encode(badJournal).write(to: PackInstaller.journalURL(docs: docs, region: badRegion))
+
+        PackInstaller.reconcileJournal(region: badRegion, documentsURL: docs)
+
+        let oldFilePreserved = (try? Data(contentsOf: badDestURL)) == oldContent
+        let oldRecordPreserved = PackInstaller.loadRecord(region: badRegion) == oldRecord
+        let badJournalGone = !FileManager.default.fileExists(atPath: PackInstaller.journalURL(docs: docs, region: badRegion).path)
+        let badStagingGone = !FileManager.default.fileExists(atPath: badStagingDir.path)
+        let unrecoverableOk = oldFilePreserved && oldRecordPreserved && badJournalGone && badStagingGone
+        report(
+            "reconcile-journal-unrecoverable", unrecoverableOk,
+            "oldFilePreserved=\(oldFilePreserved) oldRecordPreserved=\(oldRecordPreserved) "
+                + "journalGone=\(badJournalGone) stagingGone=\(badStagingGone)"
+        )
+        ok = ok && unrecoverableOk
+        try? FileManager.default.removeItem(at: badDestURL)
+        try? FileManager.default.removeItem(at: badRecordURL)
+
+        // -- M-02: catalog validator rejections, including the audit's own path-traversal
+        // proof (appending "../escape" and standardizing walks outside the base URL/dir).
+        let goodRegionIdOk = PackCatalogValidator.validateRegionId("lu-dev")
+        let badRegionIdOk = !PackCatalogValidator.validateRegionId("LU_DEV!")
+        report("validate-region-id", goodRegionIdOk && badRegionIdOk, "good=\(goodRegionIdOk) badRejected=\(badRegionIdOk)")
+        ok = ok && goodRegionIdOk && badRegionIdOk
+
+        let escapeFileRejected = !PackCatalogValidator.validateFileName("../escape")
+        let leafFileOk = PackCatalogValidator.validateFileName("lu-dev.rpack")
+        report(
+            "validate-artifact-file-path-traversal", escapeFileRejected && leafFileOk,
+            "escapeRejected=\(escapeFileRejected) leafOk=\(leafFileOk)"
+        )
+        ok = ok && escapeFileRejected && leafFileOk
+
+        let badShaRejected = !PackCatalogValidator.validateSha256("not-a-sha")
+        let goodShaOk = PackCatalogValidator.validateSha256(String(repeating: "a", count: 64))
+        report("validate-sha256", badShaRejected && goodShaOk, "badRejected=\(badShaRejected) goodOk=\(goodShaOk)")
+        ok = ok && badShaRejected && goodShaOk
+
+        let remotePathEscapes = !PackCatalogValidator.validateRemotePath("../escape", baseURL: PackCatalogClient.baseURL)
+        let remotePathStaysUnder = PackCatalogValidator.validateRemotePath(
+            "packs/lu-dev/1/lu-dev.rpack", baseURL: PackCatalogClient.baseURL
+        )
+        report(
+            "validate-remote-path-traversal", remotePathEscapes && remotePathStaysUnder,
+            "escapeRejected=\(remotePathEscapes) normalOk=\(remotePathStaysUnder)"
+        )
+        ok = ok && remotePathEscapes && remotePathStaysUnder
+
+        let validArtifact = PackArtifact(
+            file: "lu-dev.rpack", bytes: 100, sha256: String(repeating: "a", count: 64),
+            path: "packs/lu-dev/1/lu-dev.rpack"
+        )
+        let escapingArtifact = PackArtifact(
+            file: "../escape", bytes: 100, sha256: String(repeating: "a", count: 64),
+            path: "packs/lu-dev/1/lu-dev.rpack"
+        )
+        let malformedCatalog = PackCatalog(
+            regionId: "lu-dev", regionName: "LU Dev", osmSnapshotEpoch: 1,
+            artifacts: PackArtifacts(regionPack: escapingArtifact, chargerPack: validArtifact, mapPack: validArtifact)
+        )
+        var malformedCatalogRejected = false
+        do {
+            try PackCatalogValidator.validate(catalog: malformedCatalog, requestedRegion: "lu-dev")
+        } catch {
+            malformedCatalogRejected = true
+        }
+        report("validate-catalog-rejects-malformed-file", malformedCatalogRejected)
+        ok = ok && malformedCatalogRejected
+
+        let mismatchedCatalog = PackCatalog(
+            regionId: "lu-dev", regionName: "LU Dev", osmSnapshotEpoch: 1,
+            artifacts: PackArtifacts(regionPack: validArtifact, chargerPack: validArtifact, mapPack: validArtifact)
+        )
+        var regionMismatchRejected = false
+        do {
+            try PackCatalogValidator.validate(catalog: mismatchedCatalog, requestedRegion: "eu-west")
+        } catch {
+            regionMismatchRejected = true
+        }
+        report("validate-catalog-rejects-region-mismatch", regionMismatchRejected)
+        ok = ok && regionMismatchRejected
+
+        // -- M-01: a record with no backing files must not read as plain "Installed".
+        let repairRegion = "autotest-needs-repair"
+        let repairRecordURL = docs.appendingPathComponent("installed-\(repairRegion).json")
+        let repairRecord = InstalledRecord(
+            regionId: repairRegion, epoch: 1,
+            artifacts: ["region_pack": InstalledArtifactRecord(file: "\(repairRegion).rpack", sha256: String(repeating: "a", count: 64))]
+        )
+        try? PackInstaller.saveRecord(repairRecord)
+        installer.refreshRows()
+        let repairRow = installer.rows.first { $0.id == repairRegion }
+        let needsRepairOk = repairRow?.needsRepair == true && repairRow?.installedEpoch == 1
+        report("needs-repair-row-flagged", needsRepairOk, "row=\(String(describing: repairRow))")
+        ok = ok && needsRepairOk
+        try? FileManager.default.removeItem(at: repairRecordURL)
+
+        return ok
     }
 
     // MARK: triplog-smoke

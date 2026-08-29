@@ -154,6 +154,16 @@ final class PlanStore: NSObject, MLNMapViewDelegate, CLLocationManagerDelegate {
     }
 
     private var generation = 0
+    /// Bumped in `setActiveRegion` and captured in `load()` before its detached Task starts
+    /// (wayfinder #47 audit remediation, H-02 -- docs/codebase-audit-2026-08-29.md): if region
+    /// A's load is still in flight when the user switches to region B, A's Task.detached keeps
+    /// running (there's no cancellation plumbing here, only this guard) and can complete after
+    /// B's own load has already landed. Correctness rests entirely on `didLoad`/`didFail`
+    /// dropping any result whose captured `gen` no longer matches `loadGeneration` -- same
+    /// pattern as `replan()`'s `generation` guard below, just for pack loads instead of plan
+    /// requests; the two are deliberately separate counters since a route edit shouldn't
+    /// invalidate an in-flight pack load or vice versa.
+    private var loadGeneration = 0
     private var originOverridden = false
     private var hasSetOriginFromLocationFix = false
     private var originAnnotation: MLNPointAnnotation?
@@ -196,6 +206,7 @@ final class PlanStore: NSObject, MLNMapViewDelegate, CLLocationManagerDelegate {
         showingAlternative = false
         selectedDistanceM = nil
         generation += 1
+        loadGeneration += 1
 
         hasStartedLoad = false
         located = nil
@@ -223,20 +234,22 @@ final class PlanStore: NSObject, MLNMapViewDelegate, CLLocationManagerDelegate {
 
         let rpackPath = located.rpackURL.path
         let chargersURL = located.chargersURL
+        let gen = loadGeneration
         Task.detached { [weak self] in
             do {
                 let client = try PlannerClient(regionPackPath: rpackPath)
                 let bytes = try Data(contentsOf: chargersURL)
                 try client.loadChargers(bytes: bytes, format: "cpack-1")
                 let chargers = try CPack1.parseChargers(data: bytes)
-                await self?.didLoad(client: client, chargers: chargers)
+                await self?.didLoad(client: client, chargers: chargers, gen: gen)
             } catch {
-                await self?.didFail(error: error)
+                await self?.didFail(error: error, gen: gen)
             }
         }
     }
 
-    private func didLoad(client: PlannerClient, chargers: [CPack1Charger]) {
+    private func didLoad(client: PlannerClient, chargers: [CPack1Charger], gen: Int) {
+        guard gen == loadGeneration else { return }
         self.client = client
         chargersForMap = chargers
         chargerCount = chargers.count
@@ -244,7 +257,8 @@ final class PlanStore: NSObject, MLNMapViewDelegate, CLLocationManagerDelegate {
         addChargersLayerIfPossible()
     }
 
-    private func didFail(error: Error) {
+    private func didFail(error: Error, gen: Int) {
+        guard gen == loadGeneration else { return }
         plannerStatus = .failed(String(describing: error))
     }
 

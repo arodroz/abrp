@@ -52,6 +52,12 @@ struct SettingsForm: View {
                         packRow(row)
                     }
                     Toggle("Allow cellular downloads", isOn: $installer.allowCellularDownloads)
+                    if installer.lastIndexFetchFailed {
+                        Text("Couldn't check for pack updates").font(.caption).foregroundStyle(.secondary)
+                    }
+                    if let lastOperationError = installer.lastOperationError {
+                        Text(lastOperationError).font(.caption).foregroundStyle(.red)
+                    }
                 }
                 .confirmationDialog(
                     "Delete \(pendingDeleteRegionName)?",
@@ -61,7 +67,14 @@ struct SettingsForm: View {
                     )
                 ) {
                     Button("Delete", role: .destructive) {
-                        if let id = pendingDeleteRegionId { try? installer.delete(region: id) }
+                        if let id = pendingDeleteRegionId {
+                            Task {
+                                // M-03: failures are no longer swallowed with `try?` --
+                                // `installer.delete` already records them into
+                                // `lastOperationError`, rendered as the footnote row above.
+                                do { try installer.delete(region: id) } catch {}
+                            }
+                        }
                         pendingDeleteRegionId = nil
                     }
                     Button("Cancel", role: .cancel) { pendingDeleteRegionId = nil }
@@ -226,10 +239,13 @@ struct SettingsForm: View {
         HStack(spacing: 12) {
             if row.downloadFraction == nil {
                 if row.installedEpoch == nil {
-                    Button("Install") { Task { try? await installer.install(region: row.id) } }
+                    Button("Install") { runInstall(row) }
                 } else {
-                    if row.updateAvailable {
-                        Button("Update") { Task { try? await installer.install(region: row.id) } }
+                    // M-01: a needs-repair region reuses the update-available path -- Install
+                    // redownloads whatever's missing (the installer's per-artifact sha check
+                    // already skips what's still there and valid).
+                    if row.updateAvailable || row.needsRepair {
+                        Button(row.needsRepair ? "Repair" : "Update") { runInstall(row) }
                     }
                     Button("Use") { store.setActiveRegion(row.id) }
                         .disabled(row.id == store.activeRegion)
@@ -238,6 +254,14 @@ struct SettingsForm: View {
             }
         }
         .buttonStyle(.borderless)
+    }
+
+    /// M-03: failures are no longer swallowed with `try?` -- `installer.install` already
+    /// records them into `lastOperationError`, rendered as the footnote row above.
+    private func runInstall(_ row: PackInstaller.RegionRow) {
+        Task {
+            do { try await installer.install(region: row.id) } catch {}
+        }
     }
 
     private func packRowSubtitle(_ row: PackInstaller.RegionRow) -> String {
@@ -249,6 +273,9 @@ struct SettingsForm: View {
             return "Not installed" + sizeSuffix
         }
         let dateText = Self.epochDateFormatter.string(from: Date(timeIntervalSince1970: TimeInterval(installedEpoch)))
+        if row.needsRepair {
+            return "Needs repair (installed \(dateText))"
+        }
         if row.updateAvailable {
             return "Update available (installed \(dateText))"
         }
