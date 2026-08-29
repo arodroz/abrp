@@ -18,6 +18,10 @@
 // hosted catalog: fetches the index, installs the small lu-dev region (a
 // real ~49MB download), opens a PlannerClient on the installed rpack and
 // parses its Charger Pack, then deletes the region and checks cleanup.
+// `--autotest triplog-smoke` (wayfinder #51) drives TripLogStore's capture
+// lifecycle directly -- there's no location-fix injection on the sim, so
+// synthetic CLLocations are fed straight to `ingest` -- and verifies the
+// saved tlog-1 JSON against the schema #52's Rust `calibrate()` will parse.
 import CoreLocation
 import Darwin
 import Foundation
@@ -25,7 +29,7 @@ import MapLibre
 import PlannerKit
 
 enum Autotest {
-    static func runIfRequested(store: PlanStore, installer: PackInstaller) {
+    static func runIfRequested(store: PlanStore, installer: PackInstaller, tripStore: TripLogStore) {
         let args = ProcessInfo.processInfo.arguments
         guard let flagIndex = args.firstIndex(of: "--autotest"),
               flagIndex + 1 < args.count
@@ -59,6 +63,10 @@ enum Autotest {
         case "install-smoke":
             Task.detached(priority: .userInitiated) {
                 await runInstallSmoke(installer: installer)
+            }
+        case "triplog-smoke":
+            Task.detached(priority: .userInitiated) {
+                await runTriplogSmoke(tripStore: tripStore)
             }
         default:
             break
@@ -720,6 +728,144 @@ enum Autotest {
             "filesGone=\(deletedFilesGone) recordGone=\(recordGone) stylesRemain=\(stylesRemain)"
         )
         ok = ok && deletedFilesGone && recordGone && stylesRemain
+
+        await finish(ok: ok)
+    }
+
+    // MARK: triplog-smoke
+
+    /// Drives TripLogStore's capture lifecycle directly. Proves: the start/end SoC prompts and
+    /// their phase transitions, the cancel-end-SoC data-loss guard (cancelling resumes
+    /// recording rather than truncating the trace), and that the saved tlog-1 JSON matches the
+    /// schema on the fields #52's Rust `calibrate()` will parse -- including a byte-level
+    /// spot-check that the on-disk keys are really snake_case, independent of the Swift model.
+    @MainActor
+    private static func runTriplogSmoke(tripStore: TripLogStore) async {
+        var ok = true
+
+        tripStore.fetchTemperature = { _, _, _ in 14.5 }
+
+        tripStore.startTapped()
+        let promptingStart = tripStore.phase == .promptingStartSoc
+        report("prompting-start-soc", promptingStart, "phase=\(tripStore.phase)")
+        ok = ok && promptingStart
+
+        tripStore.confirmStartSoc(90)
+        let recordingAfterStart = tripStore.phase == .recording
+        report("recording-after-start", recordingAfterStart, "phase=\(tripStore.phase)")
+        ok = ok && recordingAfterStart
+        guard let tripStartDate = tripStore.tripStartDate else {
+            report("trip-start-date", false)
+            await finish(ok: false)
+        }
+
+        let originLat = 49.6116
+        let originLon = 6.1319
+        let latStepPerSecond = 0.00025
+
+        func syntheticLocation(secondOffset: Int) -> CLLocation {
+            CLLocation(
+                coordinate: CLLocationCoordinate2D(
+                    latitude: originLat + latStepPerSecond * Double(secondOffset), longitude: originLon
+                ),
+                altitude: 300, horizontalAccuracy: 5, verticalAccuracy: 5,
+                course: 0, speed: 27.8,
+                timestamp: tripStartDate.addingTimeInterval(Double(secondOffset))
+            )
+        }
+
+        for i in 0..<120 {
+            tripStore.ingest(syntheticLocation(secondOffset: i))
+        }
+
+        tripStore.stopTapped()
+        let promptingEnd = tripStore.phase == .promptingEndSoc
+        report("prompting-end-soc", promptingEnd, "phase=\(tripStore.phase)")
+        ok = ok && promptingEnd
+
+        tripStore.cancelEndSoc()
+        let backToRecording = tripStore.phase == .recording
+        report("cancel-end-soc-resumes-recording", backToRecording, "phase=\(tripStore.phase)")
+        ok = ok && backToRecording
+
+        for i in 120..<125 {
+            tripStore.ingest(syntheticLocation(secondOffset: i))
+        }
+
+        tripStore.stopTapped()
+        tripStore.confirmEndSoc(82)
+
+        let saved = await waitWithTimeout(seconds: 10) { tripStore.lastSavedURL != nil }
+        report("saved", saved, "saveErrorMessage=\(tripStore.saveErrorMessage ?? "none")")
+        ok = ok && saved
+        guard saved, let url = tripStore.lastSavedURL else { await finish(ok: false) }
+
+        do {
+            let data = try Data(contentsOf: url)
+            let log = try JSONDecoder().decode(TripLog.self, from: data)
+
+            let formatOk = log.format == "tlog-1"
+            report("format", formatOk, "got \(log.format)")
+            ok = ok && formatOk
+
+            let vehicleOk = log.vehicle == "ioniq5_lr_2wd"
+            report("vehicle", vehicleOk, "got \(log.vehicle)")
+            ok = ok && vehicleOk
+
+            let socOk = log.startSocPct == 90 && log.endSocPct == 82
+            report("soc", socOk, "start=\(log.startSocPct) end=\(log.endSocPct)")
+            ok = ok && socOk
+
+            let tempOk = log.ambientTempC == 14.5
+            report("ambient-temp", tempOk, "got \(String(describing: log.ambientTempC))")
+            ok = ok && tempOk
+
+            let countOk = log.samples.count == 125
+            report("sample-count", countOk, "expected 125, got \(log.samples.count)")
+            ok = ok && countOk
+
+            let strictlyIncreasing = zip(log.samples, log.samples.dropFirst()).allSatisfy { $0.t < $1.t }
+            report("t-strictly-increasing", strictlyIncreasing)
+            ok = ok && strictlyIncreasing
+
+            let first = log.samples.first
+            let firstCoordOk = first.map { isClose($0.lat, originLat, tol: 1e-9) && isClose($0.lon, originLon, tol: 1e-9) } ?? false
+            report("first-sample-coords", firstCoordOk, "got \(String(describing: first))")
+            ok = ok && firstCoordOk
+
+            let lastT = log.samples.last?.t ?? -1
+            let lastTOk = isClose(lastT, 124, tol: 1)
+            report("last-t", lastTOk, "got \(lastT)")
+            ok = ok && lastTOk
+
+            let lastSpeedOk = isClose(log.samples.last?.speedMps ?? -1, 27.8, tol: 0.1)
+            report("last-speed", lastSpeedOk, "got \(String(describing: log.samples.last?.speedMps))")
+            ok = ok && lastSpeedOk
+
+            let raw = String(data: data, encoding: .utf8) ?? ""
+            let snakeCaseOk = raw.contains("\"format\":") && raw.contains("\"start_soc_pct\"")
+            report("snake-case-keys", snakeCaseOk)
+            ok = ok && snakeCaseOk
+        } catch {
+            report("decode-saved-log", false, "\(error)")
+            ok = false
+        }
+
+        tripStore.refreshLogs()
+        let listedOk = tripStore.logs.contains(url)
+        report("logs-listed", listedOk, "count=\(tripStore.logs.count)")
+        ok = ok && listedOk
+
+        do {
+            try TripLogStorage.delete(url: url)
+        } catch {
+            report("delete", false, "\(error)")
+            ok = false
+        }
+        tripStore.refreshLogs()
+        let deletedOk = tripStore.logs.isEmpty && !FileManager.default.fileExists(atPath: url.path)
+        report("logs-empty-after-delete", deletedOk, "count=\(tripStore.logs.count)")
+        ok = ok && deletedOk
 
         await finish(ok: ok)
     }

@@ -17,17 +17,24 @@ targets:
     deploymentTarget: "17.0"
     sources:
       - path: Sources
+    # Generated Info.plist (wayfinder #51): the INFOPLIST_KEY_UIBackgroundModes route doesn't
+    # emit the array-valued UIBackgroundModes key at all, so this target uses xcodegen's `info:`
+    # properties block instead -- verified with `plutil -p` on the built app's Info.plist.
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: Wayfinder
+        UILaunchScreen: {}
+        NSLocationWhenInUseUsageDescription: "Shows map data and charging stops for your route, and records your GPS trace during Trip Log capture."
+        UIBackgroundModes:
+          - location
+        CADisableMinimumFrameDurationOnPhone: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: org.anteras.wayfinder
         PRODUCT_NAME: Wayfinder
         DEVELOPMENT_TEAM: 2V28CD5VJY
         CODE_SIGN_STYLE: Automatic
-        GENERATE_INFOPLIST_FILE: YES
-        INFOPLIST_KEY_CFBundleDisplayName: Wayfinder
-        INFOPLIST_KEY_UILaunchScreen_Generation: YES
-        INFOPLIST_KEY_NSLocationWhenInUseUsageDescription: "Shows map data and charging stops for your route."
-        INFOPLIST_KEY_CADisableMinimumFrameDurationOnPhone: YES
         TARGETED_DEVICE_FAMILY: "1"
         SWIFT_VERSION: "5.0"
         MARKETING_VERSION: "1.0"

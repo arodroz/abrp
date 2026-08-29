@@ -5,16 +5,20 @@
 // the bottom once a plan exists, below the locate-me button and charger callout. A gear button
 // mirrors locate-me on the opposite (bottom-left) corner, presenting the settings sheet over
 // the still-visible map. Appearance combines the system color scheme (reported here, on every
-// change) with PlanStore's persisted override via `updateAppearance(systemDark:)`.
+// change) with PlanStore's persisted override via `updateAppearance(systemDark:)`. Trip Log
+// capture (wayfinder #51) adds a record button above the gear button, driven by TripLogStore's
+// own phase machine, with the two dash-SoC prompts as plain `.alert` TextFields.
 import SwiftUI
 
 struct RootView: View {
     let store: PlanStore
     let installer: PackInstaller
+    let tripStore: TripLogStore
     @Environment(\.colorScheme) private var colorScheme
 
     @State private var toast: String?
     @State private var chargerCallout: ChargerCalloutInfo?
+    @State private var socInputText = ""
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -49,7 +53,17 @@ struct RootView: View {
             VStack {
                 Spacer()
                 HStack {
-                    settingsButton
+                    VStack(alignment: .leading, spacing: 8) {
+                        if tripStore.phase == .recording {
+                            HStack(spacing: 8) {
+                                tripRecordButton
+                                tripElapsedCapsule
+                            }
+                        } else {
+                            tripRecordButton
+                        }
+                        settingsButton
+                    }
                     Spacer()
                     locateMeButton
                 }
@@ -82,8 +96,48 @@ struct RootView: View {
             if let message = store.planErrorMessage { showToast(message) }
         }
         .sheet(isPresented: Binding(get: { store.showingSettings }, set: { store.showingSettings = $0 })) {
-            SettingsForm(store: store, installer: installer)
+            SettingsForm(store: store, installer: installer, tripStore: tripStore)
                 .presentationDetents([.medium, .large])
+        }
+        .alert(
+            "Trip start SoC",
+            isPresented: Binding(
+                get: { tripStore.phase == .promptingStartSoc },
+                set: { if !$0 { tripStore.cancelStartSoc() } }
+            )
+        ) {
+            TextField("SoC %", text: $socInputText).keyboardType(.numberPad)
+            Button("OK") {
+                if let pct = Int(socInputText) { tripStore.confirmStartSoc(pct) }
+                socInputText = ""
+            }
+            .disabled(Int(socInputText) == nil)
+            Button("Cancel", role: .cancel) {
+                tripStore.cancelStartSoc()
+                socInputText = ""
+            }
+        } message: {
+            Text("Enter the dash state of charge, as a whole percent.")
+        }
+        .alert(
+            "Trip end SoC",
+            isPresented: Binding(
+                get: { tripStore.phase == .promptingEndSoc },
+                set: { if !$0 { tripStore.cancelEndSoc() } }
+            )
+        ) {
+            TextField("SoC %", text: $socInputText).keyboardType(.numberPad)
+            Button("OK") {
+                if let pct = Int(socInputText) { tripStore.confirmEndSoc(pct) }
+                socInputText = ""
+            }
+            .disabled(Int(socInputText) == nil)
+            Button("Cancel", role: .cancel) {
+                tripStore.cancelEndSoc()
+                socInputText = ""
+            }
+        } message: {
+            Text("Enter the dash state of charge, as a whole percent.")
         }
     }
 
@@ -141,6 +195,36 @@ struct RootView: View {
                 .frame(width: 44, height: 44)
                 .background(.regularMaterial, in: Circle())
                 .shadow(color: .black.opacity(0.2), radius: 4, y: 2)
+        }
+    }
+
+    // MARK: Trip Log capture (wayfinder #51)
+
+    private var tripRecordButton: some View {
+        Button {
+            if tripStore.phase == .recording {
+                tripStore.stopTapped()
+            } else {
+                tripStore.startTapped()
+            }
+        } label: {
+            Image(systemName: tripStore.phase == .recording ? "stop.circle.fill" : "record.circle")
+                .font(.headline)
+                .foregroundColor(tripStore.phase == .recording ? .red : .blue)
+                .frame(width: 44, height: 44)
+                .background(.regularMaterial, in: Circle())
+                .shadow(color: .black.opacity(0.2), radius: 4, y: 2)
+        }
+    }
+
+    private var tripElapsedCapsule: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            let elapsedMinutes = tripStore.tripStartDate.map { Int(context.date.timeIntervalSince($0) / 60) } ?? 0
+            Text("\(elapsedMinutes) min \u{00B7} \(String(format: "%.1f", tripStore.distanceM / 1000)) km")
+                .font(.caption).bold()
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(.regularMaterial, in: Capsule())
         }
     }
 

@@ -6,7 +6,10 @@
 // @State here. Dropped "Max speed" (Speed Caps are a planner OUTPUT, not a request field --
 // ADR 0010 point 1) and "Extra weight" (no request field); added the Headwind stepper and the
 // Appearance section. The Packs section (wayfinder #47) lists every index region against
-// PackInstaller's rows with Install/Update/Use/Delete actions.
+// PackInstaller's rows with Install/Update/Use/Delete actions. The Trip Logs section
+// (wayfinder #51) lists saved Trip Logs against TripLogStore.logs, each row share-sheet
+// exportable (ADR 0009 point 5) with the same Delete-button + confirmationDialog pattern as
+// the Packs section's rows.
 import Foundation
 import PlannerKit
 import SwiftUI
@@ -14,12 +17,36 @@ import SwiftUI
 struct SettingsForm: View {
     @Bindable var store: PlanStore
     @Bindable var installer: PackInstaller
+    let tripStore: TripLogStore
     @Environment(\.dismiss) private var dismiss
     @State private var pendingDeleteRegionId: String?
+    @State private var pendingDeleteTripLogURL: URL?
 
     var body: some View {
         NavigationStack {
             Form {
+                Section("Trip Logs") {
+                    ForEach(decodedTripLogs, id: \.url) { entry in
+                        tripLogRow(url: entry.url, log: entry.log)
+                    }
+                }
+                .confirmationDialog(
+                    "Delete this Trip Log?",
+                    isPresented: Binding(
+                        get: { pendingDeleteTripLogURL != nil },
+                        set: { if !$0 { pendingDeleteTripLogURL = nil } }
+                    )
+                ) {
+                    Button("Delete", role: .destructive) {
+                        if let url = pendingDeleteTripLogURL {
+                            try? TripLogStorage.delete(url: url)
+                            tripStore.refreshLogs()
+                        }
+                        pendingDeleteTripLogURL = nil
+                    }
+                    Button("Cancel", role: .cancel) { pendingDeleteTripLogURL = nil }
+                }
+
                 Section("Packs") {
                     ForEach(installer.rows) { row in
                         packRow(row)
@@ -99,7 +126,44 @@ struct SettingsForm: View {
                     Button("Done") { dismiss() }
                 }
             }
+            .onAppear { tripStore.refreshLogs() }
         }
+    }
+
+    // MARK: Trip Logs section (wayfinder #51)
+
+    /// Decodes every saved Trip Log up front -- logs are few, so this is fine done here rather
+    /// than lazily per row.
+    private var decodedTripLogs: [(url: URL, log: TripLog)] {
+        tripStore.logs.compactMap { url in
+            guard let data = try? Data(contentsOf: url), let log = try? JSONDecoder().decode(TripLog.self, from: data) else {
+                return nil
+            }
+            return (url, log)
+        }
+    }
+
+    @ViewBuilder
+    private func tripLogRow(url: URL, log: TripLog) -> some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(Self.epochDateFormatter.string(from: Date(timeIntervalSince1970: TimeInterval(log.startUnix))))
+                Text("\(tripLogDurationText(log)) \u{00B7} SoC \(log.startSocPct)% \u{2192} \(log.endSocPct)% \u{00B7} \(log.samples.count) samples")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            ShareLink(item: url) {
+                Image(systemName: "square.and.arrow.up")
+            }
+            Button("Delete", role: .destructive) { pendingDeleteTripLogURL = url }
+        }
+        .buttonStyle(.borderless)
+    }
+
+    private func tripLogDurationText(_ log: TripLog) -> String {
+        let minutes = (log.endUnix - log.startUnix) / 60
+        guard minutes >= 60 else { return "\(minutes) min" }
+        return "\(minutes / 60)h \(minutes % 60)m"
     }
 
     /// The picker binds through the ported `StopsBias` enum; the store keeps the raw Double

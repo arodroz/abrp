@@ -5,3 +5,4 @@
 app/PlannerKit/.build/
 app/Wayfinder/Wayfinder.xcodeproj/
 app/Wayfinder/DerivedData/
+app/Wayfinder/Info.plist
