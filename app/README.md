@@ -1,10 +1,11 @@
 # app
 
 `PlannerKit/` wraps the Rust planner as a SwiftPM package (binary xcframework at
-`PlannerKit/artifacts/planner_ffi.xcframework`). `Wayfinder/` is the iOS app scaffold
-(wayfinder #39) plus the map surface (wayfinder #42): app entry + `PlanStore` + pack sideload
-wiring + a full-screen MapLibre map (PMTiles Map Pack, Chargers layer, route + Charging Stop
-layers from a Plan). The search UI, result card, and settings UI are separate later tickets.
+`PlannerKit/artifacts/planner_ffi.xcframework`). `Wayfinder/` is the iOS app: a full-screen
+MapLibre map (PMTiles Map Pack, Chargers layer, route + Charging Stop layers from a Plan) with
+a search pill + route editor overlay, a Plan result card, and a settings sheet (Packs section +
+appearance override + Trip Log controls). All four surfaces -- map, search, results, settings --
+are implemented; see `RootView.swift` for how they're composed.
 
 ## Generate the Xcode project
 
@@ -38,8 +39,9 @@ xcrun simctl launch booted org.anteras.wayfinder
 
 The app looks for `<region>.rpack` + `<region>-chargers.json` + `<region>.pmtiles` +
 `style-light.json` + `style-dark.json` in its Documents directory (`Packs.swift`; region id
-defaults to `corridor`). There is no in-app installer yet (that's M3) -- sideload by copying
-files into the booted app's container:
+defaults to `corridor`). Sideload by copying files directly into the booted app's container --
+this bypasses the installer entirely and is how the golden autotests below get their `corridor`
+pack:
 
 ```sh
 CONTAINER=$(xcrun simctl get_app_container booted org.anteras.wayfinder data)
@@ -54,16 +56,24 @@ cp ~/abrp-data/dist/corridor/style-dark.json "$CONTAINER/Documents/"
 
 ## Installing packs from the catalog
 
-The M3 installer (wayfinder #47, ADR 0011) fetches `https://wayfinder-packs.home.anteras.org`'s
+The installer (wayfinder #47, ADR 0011) fetches `https://wayfinder-packs.home.anteras.org`'s
 hosted catalog -- reachable over Tailscale/home Wi-Fi, not the open internet -- and can install
 or refresh any region from the Packs section of the settings sheet: index -> per-region catalog
 -> per-artifact sha256-driven download (a background `URLSession`, Wi-Fi-only by default) ->
-verify -> all-or-nothing commit into Documents. Sideloading (above) is still how the golden
-autotests (`plan-golden`, `map-smoke`, `editor-smoke`, `card-smoke`, `settings-smoke`, `perf`)
-get their `corridor` pack -- ADR 0011 deliberately doesn't adopt the sideloaded copy into the
-installer's bookkeeping, so the Packs section lists `corridor` as "Not installed" until the M3
-gate deletes and reinstalls it through the app. `--autotest install-smoke` exercises the
-installer's real code path end-to-end against the small `lu-dev` region instead.
+verify -> commit. Commit is a journaled roll-forward (codebase audit H-01): every artifact plus
+the two style files are staged and hashed first, then a journal recording the planned moves and
+the new installed record is written to disk *before* any destination file is touched, so a crash
+or failure partway through a commit is always recoverable -- on next launch the journal is
+either rolled forward to completion or abandoned, leaving the previous install intact. A region
+whose installed files are later found missing or corrupt (M-01) shows as "Needs repair" in the
+Packs list and reuses the same Install/Update button, relabeled "Repair".
+
+Sideloading (above) is still how the golden autotests (`plan-golden`, `map-smoke`,
+`editor-smoke`, `card-smoke`, `settings-smoke`, `triplog-smoke`, `perf`) get their `corridor`
+pack -- ADR 0011 deliberately doesn't adopt the sideloaded copy into the installer's
+bookkeeping, so the Packs section lists `corridor` as "Not installed" until deleted and
+reinstalled through the app. `--autotest install-smoke` exercises the installer's real code path
+end-to-end against the small `lu-dev` region instead.
 
 ## Run the autotests
 
@@ -100,8 +110,40 @@ through `PlannerClient` directly, guarded by the same golden shape asserts as pl
 Launching with `--autotest install-smoke` exercises the pack installer's real code path against
 the live hosted catalog: fetches the index, installs the small `lu-dev` region (a real ~49MB
 download over Tailscale/home Wi-Fi), opens a `PlannerClient` on the installed rpack and parses
-its Charger Pack, then deletes the region and checks cleanup. Requires the pack bucket to be
+its Charger Pack, then deletes the region and checks cleanup. After that live-network part it
+also runs the codebase-audit remediation checks offline, with synthetic files (journal
+roll-forward, an unrecoverable journal, catalog validator rejections including a path-traversal
+proof, and the needs-repair row flag) -- keeping the live part first means an offline failure in
+those checks is never confused with a network-dependent one. Requires the pack bucket to be
 reachable; leaves the sideloaded `corridor` pack untouched.
+
+Launching with `--autotest triplog-smoke` drives `TripLogStore`'s capture lifecycle directly --
+synthetic `CLLocation`s are fed straight to `ingest` since there's no location-fix injection on
+the sim -- and verifies the saved `tlog-1` JSON against the schema the Rust `calibrate()` will
+parse.
 
 Without a launch argument, the app starts normally and shows the map, centered on the
 Luxembourg corridor, with a small status overlay while the pack + planner load.
+
+## Verify this checkout
+
+What each gate needs, from cheapest/most automated to most manual:
+
+**Covered by CI (`.github/workflows/ci.yml`), runs from a clean checkout:**
+- `cargo test` / `cargo clippy` / `cargo fmt --check` / dependency advisory scan (Ubuntu job)
+- `scripts/build-xcframework.sh` + a diff check that `PlannerKit/Sources/PlannerKit/Planner.swift`
+  is up to date with `core/ffi` (generated-binding freshness)
+- `xcodegen` + an arm64 iOS Simulator build of the Wayfinder app (macOS job)
+
+**Local-only, need data or state CI doesn't have:**
+- `swift test --package-path app/PlannerKit` -- needs the built xcframework and a real
+  `~/abrp-data/dist/corridor` pack
+- The launch-argument autotests above except `install-smoke` -- need a pack sideloaded into
+  the simulator's Documents directory (see Sideload, above)
+- `--autotest install-smoke`'s live-network part -- additionally needs the pack bucket
+  reachable over Tailscale/home Wi-Fi
+
+**Device-only:**
+- The ADR 0001 milestone perf numbers recorded in `docs/research/` -- `--autotest perf` runs
+  fine in the simulator, but the numbers that gate a milestone are measured on the target
+  iPhone, not the simulator.

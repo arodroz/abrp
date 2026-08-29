@@ -8,10 +8,42 @@ on:
 jobs:
   rust:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      checks: write
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
+      # The channel actually used by cargo/rustup below is whatever
+      # rust-toolchain.toml pins (currently 1.98.0) -- rustup resolves that
+      # automatically for any cargo/rustup invocation inside this checkout,
+      # regardless of the toolchain the action above installed as default.
+      # Explicitly add the components so they exist on that pinned toolchain
+      # even if its install profile didn't already include them.
+      - run: rustup component add clippy rustfmt
+      - run: cargo fmt --all -- --check
       - run: cargo test --workspace --locked
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show   # installs the pinned toolchain from rust-toolchain.toml
+      - run: scripts/build-xcframework.sh
+      # Generated-binding freshness: build-xcframework.sh overwrites
+      # Planner.swift from the current ffi crate; a diff here means the
+      # committed bindings are stale relative to core/ffi.
+      - run: git diff --exit-code app/PlannerKit/Sources/
+      - run: brew install xcodegen
+      - run: xcodegen -s app/Wayfinder/project.yml
+      - run: |
+          xcodebuild -project app/Wayfinder/Wayfinder.xcodeproj -scheme Wayfinder \
+            -destination 'generic/platform=iOS Simulator' ARCHS=arm64 CODE_SIGNING_ALLOWED=NO build
+      # PlannerKit's Swift package tests (`swift test --package-path app/PlannerKit`)
+      # need local real-pack corridor data plus the built xcframework and are
+      # not reproducible from a clean checkout -- they stay local, not in CI.
