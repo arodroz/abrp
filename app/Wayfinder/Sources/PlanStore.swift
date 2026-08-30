@@ -12,11 +12,16 @@
 // generalizing to RegionBounds.swift's per-region table, and, for the refit acceptance UX
 // (#53), `referenceConsumptionWhPerKm` becoming a third persisted setting and new calibration
 // state (`calibrationResult`/`calibrationErrorMessage`/`calibrationDismissed`) recomputed via
-// `PlannerClient.calibrate` whenever the settings sheet's Trip Logs list changes.
+// `PlannerClient.calibrate` whenever the settings sheet's Trip Logs list changes, and, for
+// Drive Mode core (#59), `originIsCurrentLocation` (the Go gate's origin-provenance check) and
+// `onUserMapGesture` (DriveStore's free-look trigger, fired from a new
+// `shouldChangeFrom:to:reason:` delegate method that only trips on real gesture reasons) plus
+// `mapView(_:imageFor:)` supplying the drive puck's custom annotation image.
 import CoreLocation
 import Foundation
 import MapLibre
 import PlannerKit
+import UIKit
 
 /// One stop in the route editor: the destination or an ordered via-point (ADR 0010 point 4).
 /// `CLLocationCoordinate2D` isn't `Equatable`, so this compares lat/lon manually.
@@ -72,6 +77,13 @@ final class PlanStore: NSObject, @preconcurrency MLNMapViewDelegate, @preconcurr
     private(set) var destination: EditorWaypoint?
     private(set) var waypoints: [EditorWaypoint] = []
     private(set) var isPlanning = false
+    /// ADR 0012 point 2's Drive Mode Go gate (wayfinder #59): the origin was adopted from a
+    /// location fix and hasn't since been overridden by a long-press -- provenance, not just
+    /// "does the origin currently match a fix".
+    var originIsCurrentLocation: Bool { hasSetOriginFromLocationFix && !originOverridden }
+    /// DriveStore's free-look trigger (wayfinder #59): fired from `shouldChangeFrom:to:reason:`
+    /// below on any real map gesture while driving. Set by DriveStore's init, nil otherwise.
+    var onUserMapGesture: (() -> Void)?
     /// Bumped on every replan error, even a repeated identical one, so RootView's
     /// onChange(planErrorVersion) fires every time (a plain onChange(planErrorMessage) would
     /// miss back-to-back identical errors).
@@ -244,6 +256,17 @@ final class PlanStore: NSObject, @preconcurrency MLNMapViewDelegate, @preconcurr
     func load() {
         guard !hasStartedLoad else { return }
         hasStartedLoad = true
+
+        // UI-e2e seam (wayfinder #59): `-simulatedLocationFix "49.6116,6.1319"` launch argument.
+        // XCUITest cannot inject CoreLocation fixes, and the suite must be self-contained -- the
+        // real adoption path (via the CLLocationManagerDelegate callback below) is covered by
+        // drive-smoke and by the M4-gate device drives instead.
+        if let fixString = UserDefaults.standard.string(forKey: "simulatedLocationFix") {
+            let parts = fixString.split(separator: ",")
+            if parts.count == 2, let lat = Double(parts[0]), let lon = Double(parts[1]) {
+                adoptLocationFixAsOriginIfEligible(CLLocationCoordinate2D(latitude: lat, longitude: lon))
+            }
+        }
 
         guard let located = Packs.locate(region: activeRegion) else {
             packStatus = .missing
@@ -473,6 +496,54 @@ final class PlanStore: NSObject, @preconcurrency MLNMapViewDelegate, @preconcurr
     }
 
     // MARK: MLNMapViewDelegate
+
+    /// DriveStore's free-look trigger (wayfinder #59, ADR 0012 point 3): always allows the
+    /// change, but calls `onUserMapGesture` when `reason` is a real user gesture -- never for
+    /// `.programmatic`, which is what DriveStore's own following/overview camera moves use, so
+    /// they can't cancel following back out of itself.
+    func mapView(
+        _ mapView: MLNMapView, shouldChangeFrom oldCamera: MLNMapCamera, to newCamera: MLNMapCamera,
+        reason: MLNCameraChangeReason
+    ) -> Bool {
+        let gestureReasons: MLNCameraChangeReason = [
+            .gesturePan, .gesturePinch, .gestureRotate, .gestureZoomIn, .gestureZoomOut,
+            .gestureOneFingerZoom, .gestureTilt,
+        ]
+        if !reason.isDisjoint(with: gestureReasons) {
+            onUserMapGesture?()
+        }
+        return true
+    }
+
+    /// Custom puck image for Drive Mode's "drive-puck" annotation (wayfinder #59); every other
+    /// annotation (origin pin, scrub marker) keeps the default pin by returning nil.
+    func mapView(_ mapView: MLNMapView, imageFor annotation: MLNAnnotation) -> MLNAnnotationImage? {
+        guard annotation.title ?? "" == "drive-puck" else { return nil }
+        return Self.drivePuckImage
+    }
+
+    private static let drivePuckImage: MLNAnnotationImage = {
+        let size = CGSize(width: 30, height: 30)
+        let renderer = UIGraphicsImageRenderer(size: size)
+        let image = renderer.image { context in
+            let rect = CGRect(origin: .zero, size: size).insetBy(dx: 2, dy: 2)
+            let circle = UIBezierPath(ovalIn: rect)
+            UIColor.systemBlue.setFill()
+            circle.fill()
+            UIColor.white.setStroke()
+            circle.lineWidth = 2
+            circle.stroke()
+
+            let triangle = UIBezierPath()
+            triangle.move(to: CGPoint(x: size.width / 2, y: 7))
+            triangle.addLine(to: CGPoint(x: size.width - 9, y: size.height - 9))
+            triangle.addLine(to: CGPoint(x: 9, y: size.height - 9))
+            triangle.close()
+            UIColor.white.setFill()
+            triangle.fill()
+        }
+        return MLNAnnotationImage(image: image, reuseIdentifier: "drive-puck")
+    }()
 
     func mapView(_ mapView: MLNMapView, didFinishLoading style: MLNStyle) {
         isStyleLoaded = true

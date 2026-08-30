@@ -43,6 +43,17 @@
 // calibrationDismissed set), dismiss-sticky, and dismiss-resets-on-log-change
 // paths, plus that a corrupt log file fails the whole call loudly
 // (PlannerError.InvalidRequest) instead of being silently skipped.
+// `--autotest drive-smoke` (wayfinder #59, Drive Mode core) drives DriveStore
+// directly -- there's no CoreLocation fix injection on the sim, so a fresh
+// CLLocationManager is passed to PlanStore's own delegate method to adopt an
+// origin fix, and synthetic CLLocations are fed straight to
+// DriveStore.ingest. Proves: the Go gate both ways (no plan -> false, ready
+// plan with a current-location origin -> true, overridden origin after End
+// -> false again), entering drive hides the raw location dot and starts
+// following, on-route snap + progress on exact polyline vertices, the snap
+// pulling in a small (3-10 m) off-route offset while a 300 m offset stays
+// raw, capped course smoothing, and the four camera-mode transitions
+// (free-look on gesture, recenter, overview, overview back to following).
 import CoreLocation
 import CryptoKit
 import Darwin
@@ -51,7 +62,7 @@ import MapLibre
 import PlannerKit
 
 enum Autotest {
-    static func runIfRequested(store: PlanStore, installer: PackInstaller, tripStore: TripLogStore) {
+    static func runIfRequested(store: PlanStore, installer: PackInstaller, tripStore: TripLogStore, driveStore: DriveStore) {
         let args = ProcessInfo.processInfo.arguments
         guard let flagIndex = args.firstIndex(of: "--autotest"),
               flagIndex + 1 < args.count
@@ -93,6 +104,10 @@ enum Autotest {
         case "calibrate-smoke":
             Task.detached(priority: .userInitiated) {
                 await runCalibrateSmoke(store: store, tripStore: tripStore)
+            }
+        case "drive-smoke":
+            Task.detached(priority: .userInitiated) {
+                await runDriveSmoke(store: store, driveStore: driveStore)
             }
         default:
             break
@@ -1409,6 +1424,177 @@ enum Autotest {
         TripLogStorage.list().forEach { try? TripLogStorage.delete(url: $0) }
         UserDefaults.standard.removeObject(forKey: "referenceConsumptionWhPerKm")
         store.referenceConsumptionWhPerKm = nil
+
+        await finish(ok: ok)
+    }
+
+    // MARK: drive-smoke
+
+    /// Drives DriveStore directly (wayfinder #59) -- no CoreLocation fix injection exists on
+    /// the sim, so the origin fix goes through PlanStore's real delegate method with a fresh
+    /// CLLocationManager (it only reads locations off the array), and every drive fix goes
+    /// straight to DriveStore.ingest. See this file's header comment for the full sequence.
+    @MainActor
+    private static func runDriveSmoke(store: PlanStore, driveStore: DriveStore) async {
+        store.load()
+        let ready = await waitWithTimeout(seconds: 120) { store.plannerStatus == .ready }
+        report("planner-ready", ready)
+        guard ready else { await finish(ok: false) }
+
+        var ok = true
+
+        report("gate-no-plan", driveStore.canGo == false, "canGo=\(driveStore.canGo)")
+        ok = ok && driveStore.canGo == false
+
+        // Step 3: adopt an origin fix through PlanStore's real delegate path.
+        store.locationManager(
+            CLLocationManager(), didUpdateLocations: [CLLocation(latitude: 49.6116, longitude: 6.1319)]
+        )
+        report("origin-adopted", store.originIsCurrentLocation, "originIsCurrentLocation=\(store.originIsCurrentLocation)")
+        ok = ok && store.originIsCurrentLocation
+
+        // Step 4.
+        store.setDestination(name: "Amsterdam", coordinate: CLLocationCoordinate2D(latitude: 52.3702, longitude: 4.8952))
+        let planLanded = await waitWithTimeout(seconds: 30) { store.plan != nil }
+        report("gate-ready", planLanded && driveStore.canGo, "planLanded=\(planLanded) canGo=\(driveStore.canGo)")
+        ok = ok && planLanded && driveStore.canGo
+        guard planLanded else { await finish(ok: false) }
+
+        // Step 5.
+        driveStore.go()
+        let enterOk = driveStore.phase == .driving && driveStore.cameraMode == .following && !store.mapView.showsUserLocation
+        report(
+            "enter", enterOk,
+            "phase=\(driveStore.phase) cameraMode=\(driveStore.cameraMode) showsUserLocation=\(store.mapView.showsUserLocation)"
+        )
+        ok = ok && enterOk
+
+        guard let polyline = store.displayedPlan?.polyline, polyline.count >= 102 else {
+            report("snap-on-route", false, "polyline too short for this smoke's fixed indices")
+            await finish(ok: false)
+        }
+
+        // Step 6: three exact-vertex fixes -- on-route snap + strictly-increasing progress.
+        let vertexIndices = [0, min(50, polyline.count - 1), min(100, polyline.count - 1)]
+        var onRouteOks: [Bool] = []
+        var snapCloseOks: [Bool] = []
+        var progressValues: [Double] = []
+        for idx in vertexIndices {
+            let vertex = polyline[idx]
+            let fixCoordinate = CLLocationCoordinate2D(latitude: vertex.lat, longitude: vertex.lon)
+            let fix = CLLocation(
+                coordinate: fixCoordinate, altitude: 300, horizontalAccuracy: 5, verticalAccuracy: 5,
+                course: -1, speed: -1, timestamp: Date()
+            )
+            driveStore.ingest(fix)
+            onRouteOks.append(driveStore.isOnRoute)
+            if let snapped = driveStore.snappedCoordinate {
+                let snapDistM = CLLocation(latitude: snapped.latitude, longitude: snapped.longitude)
+                    .distance(from: CLLocation(latitude: fixCoordinate.latitude, longitude: fixCoordinate.longitude))
+                snapCloseOks.append(snapDistM <= 1)
+            } else {
+                snapCloseOks.append(false)
+            }
+            progressValues.append(driveStore.distanceAlongRouteM)
+        }
+        let snapOnRouteOk = onRouteOks.allSatisfy { $0 } && snapCloseOks.allSatisfy { $0 }
+        report("snap-on-route", snapOnRouteOk, "onRoute=\(onRouteOks) snapClose=\(snapCloseOks)")
+        ok = ok && snapOnRouteOk
+
+        let progressMonotonicOk = zip(progressValues, progressValues.dropFirst()).allSatisfy { $0 < $1 }
+        report("progress-monotonic", progressMonotonicOk, "progress=\(progressValues)")
+        ok = ok && progressMonotonicOk
+
+        // Step 7: a small (~6 m) perpendicular offset from segment [~50]'s midpoint should
+        // still snap on-route, pulled in 3-10 m from the raw fix.
+        let segIdx = min(50, polyline.count - 2)
+        let a = polyline[segIdx]
+        let b = polyline[segIdx + 1]
+        let midLat = (a.lat + b.lat) / 2
+        let midLon = (a.lon + b.lon) / 2
+        let smallOffsetCoordinate = CLLocationCoordinate2D(latitude: midLat + 0.000054, longitude: midLon)
+        driveStore.ingest(CLLocation(
+            coordinate: smallOffsetCoordinate, altitude: 300, horizontalAccuracy: 5, verticalAccuracy: 5,
+            course: -1, speed: -1, timestamp: Date()
+        ))
+        let smallOffsetSnapped = driveStore.snappedCoordinate
+        let smallOffsetDistM = smallOffsetSnapped.map {
+            CLLocation(latitude: $0.latitude, longitude: $0.longitude)
+                .distance(from: CLLocation(latitude: smallOffsetCoordinate.latitude, longitude: smallOffsetCoordinate.longitude))
+        } ?? -1
+        let snapPullsInOk = driveStore.isOnRoute
+            && smallOffsetSnapped.map { $0.latitude != smallOffsetCoordinate.latitude || $0.longitude != smallOffsetCoordinate.longitude } == true
+            && (3.0...10.0).contains(smallOffsetDistM)
+        report(
+            "snap-pulls-in", snapPullsInOk,
+            "isOnRoute=\(driveStore.isOnRoute) distFromFixM=\(smallOffsetDistM)"
+        )
+        ok = ok && snapPullsInOk
+
+        // Step 8: a far (~300 m) offset from the same midpoint should stay raw, off-route.
+        let farOffsetCoordinate = CLLocationCoordinate2D(latitude: midLat + 0.002695, longitude: midLon)
+        driveStore.ingest(CLLocation(
+            coordinate: farOffsetCoordinate, altitude: 300, horizontalAccuracy: 5, verticalAccuracy: 5,
+            course: -1, speed: -1, timestamp: Date()
+        ))
+        let farOffsetSnapped = driveStore.snappedCoordinate
+        let farOffsetDistM = farOffsetSnapped.map {
+            CLLocation(latitude: $0.latitude, longitude: $0.longitude)
+                .distance(from: CLLocation(latitude: farOffsetCoordinate.latitude, longitude: farOffsetCoordinate.longitude))
+        } ?? -1
+        let rawBeyondSnapOk = !driveStore.isOnRoute && farOffsetDistM <= 1
+        report("raw-beyond-snap", rawBeyondSnapOk, "isOnRoute=\(driveStore.isOnRoute) distFromFixM=\(farOffsetDistM)")
+        ok = ok && rawBeyondSnapOk
+
+        // Step 9: capped course smoothing -- course 0 then 180 at the same spot, capped at
+        // +/-45 deg per fix.
+        let courseFixCoordinate = CLLocationCoordinate2D(latitude: a.lat, longitude: a.lon)
+        driveStore.ingest(CLLocation(
+            coordinate: courseFixCoordinate, altitude: 300, horizontalAccuracy: 5, verticalAccuracy: 5,
+            course: 0, speed: 10, timestamp: Date()
+        ))
+        let courseBefore = driveStore.smoothedCourseDeg
+        driveStore.ingest(CLLocation(
+            coordinate: courseFixCoordinate, altitude: 300, horizontalAccuracy: 5, verticalAccuracy: 5,
+            course: 180, speed: 10, timestamp: Date()
+        ))
+        let courseAfter = driveStore.smoothedCourseDeg
+        var arcDelta = (courseAfter - courseBefore).truncatingRemainder(dividingBy: 360)
+        if arcDelta > 180 { arcDelta -= 360 }
+        if arcDelta < -180 { arcDelta += 360 }
+        let courseCappedOk = abs(arcDelta) <= 45 + 0.001
+        report("course-capped", courseCappedOk, "before=\(courseBefore) after=\(courseAfter) delta=\(arcDelta)")
+        ok = ok && courseCappedOk
+
+        // Step 10: the four camera-mode transitions.
+        driveStore.noteUserGesture()
+        let freeLookOk = driveStore.cameraMode == .freeLook
+        driveStore.recenter()
+        let recenterOk = driveStore.cameraMode == .following
+        driveStore.toggleOverview()
+        let overviewOk = driveStore.cameraMode == .overview
+        driveStore.toggleOverview()
+        let backToFollowingOk = driveStore.cameraMode == .following
+        let cameraModesOk = freeLookOk && recenterOk && overviewOk && backToFollowingOk
+        report(
+            "camera-modes", cameraModesOk,
+            "freeLook=\(freeLookOk) recenter=\(recenterOk) overview=\(overviewOk) backToFollowing=\(backToFollowingOk)"
+        )
+        ok = ok && cameraModesOk
+
+        // Step 11.
+        driveStore.end()
+        let endOk = driveStore.phase == .idle && store.plan != nil && store.mapView.showsUserLocation
+        report(
+            "end", endOk,
+            "phase=\(driveStore.phase) plan=\(store.plan != nil) showsUserLocation=\(store.mapView.showsUserLocation)"
+        )
+        ok = ok && endOk
+
+        // Step 12: re-entry guard -- a long-press origin override closes the gate again.
+        store.setOrigin(CLLocationCoordinate2D(latitude: 49.7, longitude: 6.2))
+        report("gate-overridden", driveStore.canGo == false, "canGo=\(driveStore.canGo)")
+        ok = ok && driveStore.canGo == false
 
         await finish(ok: ok)
     }

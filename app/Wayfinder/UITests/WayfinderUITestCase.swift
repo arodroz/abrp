@@ -25,13 +25,16 @@ class WayfinderUITestCase: XCTestCase {
         ("Capellen", 49.645, 5.99),
     ]
 
-    func launchApp() {
+    /// `extraLaunchArguments` (wayfinder #59): appended after the standard seeded-recents
+    /// arguments -- e.g. DriveFlowTests' `-simulatedLocationFix "lat,lon"`. Defaults to empty,
+    /// so every existing caller is unaffected.
+    func launchApp(extraLaunchArguments: [String] = []) {
         app = XCUIApplication()
         let recentsJSON = Self.seededRecents.map { "{\"name\":\"\($0.name)\",\"lat\":\($0.lat),\"lon\":\($0.lon)}" }
             .joined(separator: ",")
         app.launchArguments = [
             "-activeRegion", "corridor", "-recentDestinations", Self.legacyPlistQuoted("[\(recentsJSON)]"),
-        ]
+        ] + extraLaunchArguments
 
         addUIInterruptionMonitor(withDescription: "Location permission") { alert in
             for label in ["Allow While Using App", "Allow Once", "OK"] {

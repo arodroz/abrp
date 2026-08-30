@@ -4,12 +4,15 @@
 // chart. Ported from prototype/planner-ui's VariantDGoogle.swift `ResultCard`, adapted to the
 // store's typed `displayedPlan` (FfiPlan), and, new to this ticket, the stop-free alternative
 // toggle row (ADR 0010 point 5). Dropped the prototype's per-chip tap handler -- it opened the
-// per-stop SoC override UI, which is out of scope for this ticket.
+// per-stop SoC override UI, which is out of scope for this ticket. The Go button (wayfinder
+// #59, ADR 0012 point 2) sits in the summary row, visible only when `driveStore.canGo` --
+// origin provenance is current-location and no drive is already in progress.
 import PlannerKit
 import SwiftUI
 
 struct ResultCard: View {
     let store: PlanStore
+    let driveStore: DriveStore
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -86,6 +89,19 @@ struct ResultCard: View {
                 }
             }
             Spacer()
+            if driveStore.canGo {
+                Button {
+                    driveStore.go()
+                } label: {
+                    Label("Go", systemImage: "location.north.fill")
+                        .font(.headline).bold()
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        .background(Color.blue, in: Capsule())
+                }
+                .accessibilityIdentifier("go-button")
+            }
             Button {
                 withAnimation(.spring()) { store.cardExpanded.toggle() }
             } label: {

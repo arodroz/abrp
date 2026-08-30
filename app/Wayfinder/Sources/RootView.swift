@@ -7,13 +7,19 @@
 // the still-visible map. Appearance combines the system color scheme (reported here, on every
 // change) with PlanStore's persisted override via `updateAppearance(systemDark:)`. Trip Log
 // capture (wayfinder #51) adds a record button above the gear button, driven by TripLogStore's
-// own phase machine, with the two dash-SoC prompts as plain `.alert` TextFields.
+// own phase machine, with the two dash-SoC prompts as plain `.alert` TextFields. Drive Mode
+// core (wayfinder #59, ADR 0012 point 8) hides the planning UI entirely while
+// `driveStore.phase == .driving` -- the route editor, the settings/trip-record/locate-me
+// buttons, the charger callout, and the result card -- replacing them with a bottom
+// drive-controls bar (overview toggle, End, and a conditional Re-center). Toasts stay outside
+// the phase switch so they keep working during a drive.
 import SwiftUI
 
 struct RootView: View {
     let store: PlanStore
     let installer: PackInstaller
     let tripStore: TripLogStore
+    let driveStore: DriveStore
     @Environment(\.colorScheme) private var colorScheme
 
     @State private var toast: String?
@@ -107,12 +113,14 @@ struct RootView: View {
             )
             .ignoresSafeArea()
 
-            if !isReady {
-                statusOverlay
-            } else {
-                RouteEditorView(store: store, onToast: showToast)
-                    .padding(.horizontal)
-                    .padding(.top, 8)
+            if driveStore.phase != .driving {
+                if !isReady {
+                    statusOverlay
+                } else {
+                    RouteEditorView(store: store, onToast: showToast)
+                        .padding(.horizontal)
+                        .padding(.top, 8)
+                }
             }
 
             if let toast {
@@ -128,32 +136,36 @@ struct RootView: View {
                     .allowsHitTesting(false)
             }
 
-            VStack {
-                Spacer()
-                HStack {
-                    VStack(alignment: .leading, spacing: 8) {
-                        if tripStore.phase == .recording {
-                            HStack(spacing: 8) {
-                                tripRecordButton
-                                tripElapsedCapsule
-                            }
-                        } else {
-                            tripRecordButton
-                        }
-                        settingsButton
-                    }
+            if driveStore.phase == .driving {
+                driveControlsOverlay
+            } else {
+                VStack {
                     Spacer()
-                    locateMeButton
-                }
-                .padding(.horizontal, 16)
-                .padding(.bottom, 8)
-                if let chargerCallout {
-                    ChargerCalloutView(info: chargerCallout, onDismiss: { self.chargerCallout = nil })
-                        .padding(.horizontal, 12)
-                        .padding(.bottom, 8)
-                }
-                if store.plan != nil {
-                    ResultCard(store: store)
+                    HStack {
+                        VStack(alignment: .leading, spacing: 8) {
+                            if tripStore.phase == .recording {
+                                HStack(spacing: 8) {
+                                    tripRecordButton
+                                    tripElapsedCapsule
+                                }
+                            } else {
+                                tripRecordButton
+                            }
+                            settingsButton
+                        }
+                        Spacer()
+                        locateMeButton
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 8)
+                    if let chargerCallout {
+                        ChargerCalloutView(info: chargerCallout, onDismiss: { self.chargerCallout = nil })
+                            .padding(.horizontal, 12)
+                            .padding(.bottom, 8)
+                    }
+                    if store.plan != nil {
+                        ResultCard(store: store, driveStore: driveStore)
+                    }
                 }
             }
         }
@@ -216,6 +228,67 @@ struct RootView: View {
                 .shadow(color: .black.opacity(0.2), radius: 4, y: 2)
         }
         .accessibilityIdentifier("settings-button")
+    }
+
+    // MARK: Drive Mode controls (wayfinder #59)
+
+    private var driveControlsOverlay: some View {
+        VStack {
+            Spacer()
+            HStack {
+                driveOverviewButton
+                Spacer()
+                if driveStore.cameraMode != .following {
+                    driveRecenterButton
+                }
+                driveEndButton
+            }
+            .padding(.horizontal, 16)
+            .padding(.bottom, 8)
+        }
+    }
+
+    private var driveOverviewButton: some View {
+        Button {
+            driveStore.toggleOverview()
+        } label: {
+            Image(systemName: "map")
+                .font(.headline)
+                .foregroundColor(.blue)
+                .frame(width: 44, height: 44)
+                .background(.regularMaterial, in: Circle())
+                .shadow(color: .black.opacity(0.2), radius: 4, y: 2)
+        }
+        .accessibilityIdentifier("drive-overview-button")
+    }
+
+    private var driveRecenterButton: some View {
+        Button {
+            driveStore.recenter()
+        } label: {
+            Image(systemName: "location.north.line.fill")
+                .font(.headline)
+                .foregroundColor(.blue)
+                .frame(width: 44, height: 44)
+                .background(.regularMaterial, in: Circle())
+                .shadow(color: .black.opacity(0.2), radius: 4, y: 2)
+        }
+        .accessibilityIdentifier("drive-recenter-button")
+    }
+
+    private var driveEndButton: some View {
+        Button {
+            driveStore.end()
+        } label: {
+            Text("End")
+                .font(.headline).bold()
+                .foregroundColor(.white)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 12)
+                .background(Color.red, in: Capsule())
+                .shadow(color: .black.opacity(0.2), radius: 4, y: 2)
+        }
+        .accessibilityIdentifier("drive-end-button")
     }
 
     // MARK: Trip Log capture (wayfinder #51)

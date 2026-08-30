@@ -5,7 +5,9 @@
 // from PlanStore -- see TripLogStore.swift's header. `AppDelegate` exists solely to catch the
 // background URLSession completion handler (codebase audit H-01/H-03, wayfinder #47 --
 // docs/codebase-audit-2026-08-29.md): PackInstaller's background downloads need it stashed
-// somewhere `urlSessionDidFinishEvents(forBackgroundURLSession:)` can reach.
+// somewhere `urlSessionDidFinishEvents(forBackgroundURLSession:)` can reach. DriveStore
+// (Drive Mode core, wayfinder #59) is owned here too, wrapping `store` (PlanStore) rather than
+// duplicating its map/route state.
 import Foundation
 import SwiftUI
 import UIKit
@@ -40,17 +42,19 @@ struct WayfinderApp: App {
     private let store = PlanStore()
     private let packInstaller = PackInstaller()
     private let tripStore = TripLogStore()
+    private let driveStore: DriveStore
 
     init() {
         _ = Self.launchUptime
-        Autotest.runIfRequested(store: store, installer: packInstaller, tripStore: tripStore)
+        driveStore = DriveStore(planStore: store)
+        Autotest.runIfRequested(store: store, installer: packInstaller, tripStore: tripStore, driveStore: driveStore)
         let installer = packInstaller
         Task { await installer.checkForUpdates() }
     }
 
     var body: some Scene {
         WindowGroup {
-            RootView(store: store, installer: packInstaller, tripStore: tripStore)
+            RootView(store: store, installer: packInstaller, tripStore: tripStore, driveStore: driveStore)
         }
     }
 }
