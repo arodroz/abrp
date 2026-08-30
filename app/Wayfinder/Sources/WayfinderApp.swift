@@ -46,7 +46,7 @@ struct WayfinderApp: App {
 
     init() {
         _ = Self.launchUptime
-        driveStore = DriveStore(planStore: store)
+        driveStore = DriveStore(planStore: store, tripStore: tripStore)
         Autotest.runIfRequested(store: store, installer: packInstaller, tripStore: tripStore, driveStore: driveStore)
         let installer = packInstaller
         Task { await installer.checkForUpdates() }

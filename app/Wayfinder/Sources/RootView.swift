@@ -72,7 +72,10 @@ struct RootView: View {
                 "Trip start SoC",
                 isPresented: Binding(
                     get: { tripStore.phase == .promptingStartSoc },
-                    set: { if !$0 { tripStore.cancelStartSoc() } }
+                    // SwiftUI calls this on EVERY dismissal, OK included, after the button
+                    // action has run (same ordering fact confirmEndSoc's doc-comment relies on)
+                    // -- so this is the one place a pending Go (wayfinder #62) resolves.
+                    set: { if !$0 { tripStore.cancelStartSoc(); driveStore.resolvePendingGo() } }
                 )
             ) {
                 TextField("SoC %", text: $socInputText).keyboardType(.numberPad)

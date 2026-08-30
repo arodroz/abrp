@@ -11,6 +11,10 @@
 // card (wayfinder #60) is only checked for presence and its expand/collapse toggle here -- HUD
 // VALUE updates (ETA, remaining distance, SoC) aren't assertable from XCUITest since it can't
 // inject CoreLocation fixes; that's drive-smoke's job (its "hud-initial"/"hud-updates" asserts).
+// Trip Log coupling (wayfinder #62, ADR 0012 point 7): Go now opens the "Trip start SoC" alert
+// before entering, handled with TripLogFlowTests' exact alert idiom; End opens "Trip end SoC",
+// which this test Cancels deliberately (see that step's own comment) so no tlog file lands in
+// the shared simulator container for other suites to trip over.
 import XCTest
 
 final class DriveFlowTests: WayfinderUITestCase {
@@ -22,6 +26,14 @@ final class DriveFlowTests: WayfinderUITestCase {
             waitForExistence(el("go-button"), timeout: 15), "go button never appeared for a current-location-origin plan"
         )
         el("go-button").tap()
+
+        // Go now opens the Trip Log's start-SoC prompt (wayfinder #62, ADR 0012 point 7) before
+        // entering -- same alert-handling idiom as TripLogFlowTests' start prompt.
+        let startAlert = app.alerts["Trip start SoC"]
+        XCTAssertTrue(waitForExistence(startAlert, timeout: 10), "\"Trip start SoC\" alert never appeared after tapping Go")
+        startAlert.textFields.firstMatch.typeText("80")
+        startAlert.buttons["OK"].tap()
+        XCTAssertTrue(waitForNonexistence(startAlert, timeout: 5), "\"Trip start SoC\" alert is still up after OK")
 
         XCTAssertTrue(waitForExistence(el("drive-end-button"), timeout: 10), "drive-end-button never appeared after tapping Go")
         XCTAssertTrue(waitForNonexistence(el("search-pill"), timeout: 5), "search-pill still present after entering drive")
@@ -63,9 +75,20 @@ final class DriveFlowTests: WayfinderUITestCase {
         el("drive-overview-button").tap()
 
         el("drive-end-button").tap()
+
+        // End now closes the shared Trip Log capture with the end-SoC prompt (wayfinder #62).
+        // Cancel it deliberately here, not OK: the data-loss guard resumes capture as a
+        // standalone recording AND no tlog file is written into the shared simulator container,
+        // which other suites' log expectations could otherwise see.
+        let endAlert = app.alerts["Trip end SoC"]
+        XCTAssertTrue(waitForExistence(endAlert, timeout: 10), "\"Trip end SoC\" alert never appeared after tapping End")
+        endAlert.buttons["Cancel"].tap()
+        XCTAssertTrue(waitForNonexistence(endAlert, timeout: 5), "\"Trip end SoC\" alert is still up after Cancel")
+
         XCTAssertTrue(waitForExistence(el("search-pill"), timeout: 10), "search-pill never returned after End")
         XCTAssertTrue(waitForExistence(el("result-card"), timeout: 10), "result-card never returned after End")
         XCTAssertTrue(waitForExistence(el("go-button"), timeout: 10), "go-button never returned after End")
+        XCTAssertTrue(waitForExistence(el("trip-record-button"), timeout: 10), "trip-record-button never appeared after End")
     }
 
     /// The Go gate is provenance-based (ADR 0012 point 2): a long-press origin is by definition

@@ -54,12 +54,20 @@
 // pulling in a small (3-10 m) off-route offset while a 300 m offset stays
 // raw, capped course smoothing, and the four camera-mode transitions
 // (free-look on gesture, recenter, overview, overview back to following). Its
-// final steps (wayfinder #61, ADR 0012 point 6) prove off-route detection +
+// next steps (wayfinder #61, ADR 0012 point 6) prove off-route detection +
 // silent replan: a single noisy excursion doesn't fire one, a sustained (>=5
 // s) 50+ m deviation does, the landed plan departs from the deviated
 // position at the model's own predicted SoC (not the settings slider), and
 // the drive survives the swap with the snap engine re-snapping against the
-// new geometry on the very next fix.
+// new geometry on the very next fix. Its final steps (wayfinder #62, ADR
+// 0012 point 7) prove the Trip Log coupling: Go opens the start-SoC prompt
+// instead of entering directly, cancelling that prompt cancels the Go with
+// no capture left behind, confirming it both enters the drive AND starts
+// capture, End/arrival stops capture into the end-SoC prompt, and a
+// STANDALONE capture already running (record button) is adopted outright by
+// Go with no prompt -- the drive-closed log this produces is byte-for-byte
+// the same shape triplog-smoke's button-started one is, since it's the same
+// producer.
 import CoreLocation
 import CryptoKit
 import Darwin
@@ -113,7 +121,7 @@ enum Autotest {
             }
         case "drive-smoke":
             Task.detached(priority: .userInitiated) {
-                await runDriveSmoke(store: store, driveStore: driveStore)
+                await runDriveSmoke(store: store, tripStore: tripStore, driveStore: driveStore)
             }
         default:
             break
@@ -1461,7 +1469,16 @@ enum Autotest {
     /// CLLocationManager (it only reads locations off the array), and every drive fix goes
     /// straight to DriveStore.ingest. See this file's header comment for the full sequence.
     @MainActor
-    private static func runDriveSmoke(store: PlanStore, driveStore: DriveStore) async {
+    private static func runDriveSmoke(store: PlanStore, tripStore: TripLogStore, driveStore: DriveStore) async {
+        // Deterministic Trip Log capture (same idiom as triplog-smoke): a stubbed authorization
+        // status and temperature fetch so step 13's (#62) capture never depends on the
+        // simulator's real permission state or the network.
+        tripStore.authorizationStatus = { .authorizedWhenInUse }
+        tripStore.fetchTemperature = { _, _, _ in 15.0 }
+        // So this smoke can delete only the log IT saves at the end, leaving any pre-existing
+        // ones (e.g. from a prior triplog-smoke run) untouched.
+        let preexistingLogs = Set(TripLogStorage.list())
+
         store.load()
         let ready = await waitWithTimeout(seconds: 120) { store.plannerStatus == .ready }
         report("planner-ready", ready)
@@ -1486,12 +1503,36 @@ enum Autotest {
         ok = ok && planLanded && driveStore.canGo
         guard planLanded else { await finish(ok: false) }
 
-        // Step 5.
+        // Step 5 (wayfinder #62): Go now opens the start-SoC prompt instead of entering
+        // directly.
         driveStore.go()
-        let enterOk = driveStore.phase == .driving && driveStore.cameraMode == .following && !store.mapView.showsUserLocation
+        let goPromptsOk = driveStore.phase == .idle && driveStore.pendingGo && tripStore.phase == .promptingStartSoc
+        report(
+            "go-prompts", goPromptsOk,
+            "phase=\(driveStore.phase) pendingGo=\(driveStore.pendingGo) tripPhase=\(tripStore.phase)"
+        )
+        ok = ok && goPromptsOk
+
+        // Cancelling that prompt cancels the Go outright -- no half-open capture.
+        tripStore.cancelStartSoc()
+        driveStore.resolvePendingGo()
+        let goCancelledOk = driveStore.phase == .idle && !driveStore.pendingGo && tripStore.phase == .idle
+        report(
+            "go-cancelled", goCancelledOk,
+            "phase=\(driveStore.phase) pendingGo=\(driveStore.pendingGo) tripPhase=\(tripStore.phase)"
+        )
+        ok = ok && goCancelledOk
+
+        // Confirming it both enters the drive AND starts capture.
+        driveStore.go()
+        tripStore.confirmStartSoc(80)
+        driveStore.resolvePendingGo()
+        let enterOk = driveStore.phase == .driving && driveStore.cameraMode == .following
+            && !store.mapView.showsUserLocation && tripStore.phase == .recording
         report(
             "enter", enterOk,
-            "phase=\(driveStore.phase) cameraMode=\(driveStore.cameraMode) showsUserLocation=\(store.mapView.showsUserLocation)"
+            "phase=\(driveStore.phase) cameraMode=\(driveStore.cameraMode) "
+                + "showsUserLocation=\(store.mapView.showsUserLocation) tripPhase=\(tripStore.phase)"
         )
         ok = ok && enterOk
 
@@ -1615,8 +1656,13 @@ enum Autotest {
         // so the HUD/stepper/arrival continuation below starts clean from distance 0 -- values
         // re-derived from the plan object itself, not hardcoded stop names, since the active
         // region on the sim may be corridor or eu-west and their goldens differ in stop sets.
+        // (wayfinder #62: end() now flips tripStore to .promptingEndSoc, and go() re-opens the
+        // start-SoC prompt -- both resolved inline here to keep this re-entry a single step.)
         driveStore.end()
+        tripStore.confirmEndSoc(70)
         driveStore.go()
+        tripStore.confirmStartSoc(80)
+        driveStore.resolvePendingGo()
         guard let plan = store.displayedPlan else {
             report("hud-initial", false, "no displayed plan after re-entering drive")
             await finish(ok: false)
@@ -1716,20 +1762,30 @@ enum Autotest {
         )
         ok = ok && arrivalOk
 
-        // Step: end from arrived.
+        // Destination arrival also closes capture (wayfinder #62) with the end-SoC prompt.
+        let arrivalStopsCaptureOk = tripStore.phase == .promptingEndSoc
+        report("arrival-stops-capture", arrivalStopsCaptureOk, "tripPhase=\(tripStore.phase)")
+        ok = ok && arrivalStopsCaptureOk
+
+        // Step: end from arrived -- must NOT double-stop capture, already .promptingEndSoc.
         driveStore.end()
         let endOk = driveStore.phase == .idle && store.plan != nil && store.mapView.showsUserLocation
+            && tripStore.phase == .promptingEndSoc
         report(
             "end", endOk,
-            "phase=\(driveStore.phase) plan=\(store.plan != nil) showsUserLocation=\(store.mapView.showsUserLocation)"
+            "phase=\(driveStore.phase) plan=\(store.plan != nil) showsUserLocation=\(store.mapView.showsUserLocation) "
+                + "tripPhase=\(tripStore.phase)"
         )
         ok = ok && endOk
+        tripStore.confirmEndSoc(60)
 
         // Step 12 (wayfinder #61): off-route detection + silent replan-from-position. Re-enter
         // drive (origin still adopted, plan still displayed from the steps above -- canGo
         // holds) and build a truly perpendicular 60 m offset off the segment at ~2 km along, in
         // the same local equirectangular plane RouteSnap.snap projects into.
         driveStore.go()
+        tripStore.confirmStartSoc(80)
+        driveStore.resolvePendingGo()
         guard let plan61 = store.displayedPlan else {
             report("offroute-noise", false, "no displayed plan after re-entering drive for step 12")
             await finish(ok: false)
@@ -1835,6 +1891,67 @@ enum Autotest {
         ok = ok && survivesOk
 
         driveStore.end()
+        tripStore.confirmEndSoc(55)
+
+        // Step 13 (wayfinder #62, ADR 0012 point 7): a STANDALONE capture (started via the
+        // record button, not Go) is ADOPTED as the drive's capture outright -- one capture,
+        // never two. Origin is still current-location here (the off-route replan above
+        // re-adopted it), so canGo still holds.
+        tripStore.startTapped()
+        tripStore.confirmStartSoc(75)
+        driveStore.go()
+        let goSharesCaptureOk = driveStore.phase == .driving && !driveStore.pendingGo && tripStore.phase == .recording
+        report(
+            "go-shares-capture", goSharesCaptureOk,
+            "phase=\(driveStore.phase) pendingGo=\(driveStore.pendingGo) tripPhase=\(tripStore.phase)"
+        )
+        ok = ok && goSharesCaptureOk
+
+        guard let captureTripStartDate = tripStore.tripStartDate else {
+            report("drive-log-saved", false, "no tripStartDate after adopting the standalone capture")
+            await finish(ok: false)
+        }
+        for secondOffset in 1...3 {
+            tripStore.ingest(CLLocation(
+                coordinate: CLLocationCoordinate2D(latitude: 49.6116, longitude: 6.1319),
+                altitude: 300, horizontalAccuracy: 5, verticalAccuracy: 5, course: -1, speed: 15,
+                timestamp: captureTripStartDate.addingTimeInterval(Double(secondOffset))
+            ))
+        }
+
+        // End (not arrival) closes the shared capture too, same end-SoC prompt.
+        driveStore.end()
+        let endPromptsEndSocOk = tripStore.phase == .promptingEndSoc && driveStore.phase == .idle
+        report(
+            "end-prompts-endsoc", endPromptsEndSocOk,
+            "tripPhase=\(tripStore.phase) drivePhase=\(driveStore.phase)"
+        )
+        ok = ok && endPromptsEndSocOk
+
+        // The drive-closed log is shape-identical to a button-started one because it IS the
+        // same producer.
+        let savedBefore = tripStore.lastSavedURL
+        tripStore.confirmEndSoc(65)
+        let driveLogSaved = await waitWithTimeout(seconds: 15) { tripStore.lastSavedURL != savedBefore }
+        if driveLogSaved, let url = tripStore.lastSavedURL {
+            do {
+                let data = try Data(contentsOf: url)
+                let log = try JSONDecoder().decode(TripLog.self, from: data)
+                let driveLogSavedOk = log.format == "tlog-1" && log.startSocPct == 75 && log.endSocPct == 65
+                    && log.samples.count == 3
+                report(
+                    "drive-log-saved", driveLogSavedOk,
+                    "format=\(log.format) start=\(log.startSocPct) end=\(log.endSocPct) samples=\(log.samples.count)"
+                )
+                ok = ok && driveLogSavedOk
+            } catch {
+                report("drive-log-saved", false, "\(error)")
+                ok = false
+            }
+        } else {
+            report("drive-log-saved", false, "lastSavedURL never changed")
+            ok = false
+        }
 
         // Step: re-entry guard -- a long-press origin override closes the gate again. Note the
         // off-route replan above reset `originOverridden` to false (it adopts the deviated fix
@@ -1843,6 +1960,11 @@ enum Autotest {
         store.setOrigin(CLLocationCoordinate2D(latitude: 49.7, longitude: 6.2))
         report("gate-overridden", driveStore.canGo == false, "canGo=\(driveStore.canGo)")
         ok = ok && driveStore.canGo == false
+
+        // Clean up only the log(s) this smoke itself saved -- `preexistingLogs` above.
+        for url in TripLogStorage.list() where !preexistingLogs.contains(url) {
+            try? TripLogStorage.delete(url: url)
+        }
 
         await finish(ok: ok)
     }

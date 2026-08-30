@@ -15,8 +15,15 @@
 // sustained (>=5 s) 50+ m deviation from the displayed route triggers `PlanStore.replanForDrive`
 // from the deviated position, and a landed result is swapped in via the same HUD/geometry
 // snapshot `go()` uses -- automatic, silent, no camera yank (RootView gates its fit-to-route on
-// `phase == .idle`), just a brief "Route updated" toast off `routeUpdatedVersion`. Trip Log
-// wiring (#67) is still a later ticket, also keyed off `distanceAlongRouteM`.
+// `phase == .idle`), just a brief "Route updated" toast off `routeUpdatedVersion`.
+//
+// Trip Log coupling (wayfinder #62, ADR 0012 point 7): Go takes the dash SoC and starts capture,
+// reusing TripLogStore's own start/stop phases rather than a second capture path -- `go()` opens
+// the start-SoC alert (via `pendingGo`) unless a standalone capture is already `.recording`, in
+// which case it's adopted as the drive's capture outright. End or destination arrival stops
+// capture with the end-SoC prompt; cancelling the start prompt cancels the Go, no half-open
+// capture. Per-sample Trip Log wiring beyond start/stop (#67) is still a later ticket, also keyed
+// off `distanceAlongRouteM`.
 import CoreLocation
 import Foundation
 import MapLibre
@@ -68,6 +75,9 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
     var driveCardExpanded = false
     /// Bumped when an off-route replan (wayfinder #61) lands; RootView's toast trigger.
     private(set) var routeUpdatedVersion = 0
+    /// A Go awaiting the start-SoC prompt's outcome (wayfinder #62); the drive hasn't entered
+    /// yet -- see `go()`/`resolvePendingGo()`.
+    private(set) var pendingGo = false
 
     struct DriveHud: Equatable {
         let etaDate: Date
@@ -88,6 +98,7 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
     }
 
     private let planStore: PlanStore
+    private let tripStore: TripLogStore
     private let locationManager = CLLocationManager()
     private var routePolyline: [CLLocationCoordinate2D] = []
     private var routeCumulativeM: [Double] = []
@@ -119,8 +130,9 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
     private static let offRouteThresholdM = 50.0
     private static let offRouteSustainedS = 5.0
 
-    init(planStore: PlanStore) {
+    init(planStore: PlanStore, tripStore: TripLogStore) {
         self.planStore = planStore
+        self.tripStore = tripStore
         super.init()
         locationManager.delegate = self
         planStore.onUserMapGesture = { [weak self] in self?.noteUserGesture() }
@@ -128,10 +140,38 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
 
     // MARK: Lifecycle
 
+    /// ADR 0012 point 7 (wayfinder #62): Go and the standalone record button share ONE Trip Log
+    /// capture, never two. If a capture is already `.recording` (started via the record button),
+    /// it's ADOPTED as the drive's capture and the drive enters immediately; if capture is
+    /// `.idle`, this opens the existing start-SoC alert (`TripLogStore.startTapped`) and defers
+    /// entry to `resolvePendingGo()`, called once that alert resolves. The `else` branch (a SoC
+    /// prompt already up) is unreachable via the UI -- alerts are modal.
+    func go() {
+        guard canGo, !pendingGo else { return }
+        if tripStore.phase == .recording {
+            enterDrive()
+        } else if tripStore.phase == .idle {
+            pendingGo = true
+            tripStore.startTapped()
+        }
+    }
+
+    /// The single resolution point for a pending Go's start-SoC prompt -- called from RootView
+    /// when the "Trip start SoC" alert dismisses, OK or Cancel. Entering only on `.recording`
+    /// means both an explicit Cancel and `confirmStartSoc`'s denied-authorization refusal cancel
+    /// the Go -- no half-open capture, no drive without its log.
+    func resolvePendingGo() {
+        guard pendingGo else { return }
+        pendingGo = false
+        if tripStore.phase == .recording {
+            enterDrive()
+        }
+    }
+
     /// Snapshots the displayed Plan's polyline and HUD engine state at entry via `snapshotPlan`
     /// (shared with the off-route replan swap, wayfinder #61 -- see that method's adopt comment
     /// for what it deliberately leaves untouched), plus this method's own phase-entry work.
-    func go() {
+    private func enterDrive() {
         guard canGo, let plan = planStore.displayedPlan else { return }
 
         snapshotPlan(plan)
@@ -185,7 +225,11 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
     }
 
     /// The Plan and its map layers stay intact -- planning UI just returns, via RootView's
-    /// phase switch.
+    /// phase switch. Also closes capture (wayfinder #62) with the end-SoC prompt; guard-idempotent
+    /// with the arrival path in `ingest` below (already `.promptingEndSoc` by then when arrival
+    /// got there first). Cancelling THAT end prompt rides TripLogStore's existing data-loss guard
+    /// -- capture resumes as a standalone recording (the drive is already over), stoppable via
+    /// the record button.
     func end() {
         guard phase != .idle else { return }
         locationManager.stopUpdatingLocation()
@@ -194,6 +238,7 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
         planStore.mapView.showsUserLocation = true
         driveCardExpanded = false
         phase = .idle
+        if tripStore.phase == .recording { tripStore.stopTapped() }
     }
 
     // MARK: Fix ingestion
@@ -224,12 +269,15 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
 
         // Destination arrival (~40 m along-route, ADR 0012 point 3) ends the drive into an
         // arrival state: location updates stop and the puck/camera are left exactly where they
-        // last were -- `end()` is what finally tears them down.
+        // last were -- `end()` is what finally tears them down. Also closes capture (wayfinder
+        // #62, ADR 0012 point 7) with the end-SoC prompt -- arrival is as much an end as tapping
+        // End is.
         if distanceAlongRouteM >= (drivePlan?.totalDistM ?? 0) - 40 {
             phase = .arrived
             hud = computeHud(distanceAlongM: distanceAlongRouteM)
             lastHudFixTimestamp = location.timestamp
             locationManager.stopUpdatingLocation()
+            if tripStore.phase == .recording { tripStore.stopTapped() }
             return
         }
 
