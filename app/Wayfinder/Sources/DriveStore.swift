@@ -1,11 +1,16 @@
 // Drive Mode core (wayfinder #59, ADR 0012 points 1-3 and 8): a Go/drive/End state machine
 // entered from the result card's Go button, driving a heading-up following camera and a
-// route-snapped puck off real CLLocationManager fixes. No HUD data surface, no off-route
-// replan, no Trip Log wiring -- those are later tickets (#60/#61/#67 consume
-// `distanceAlongRouteM`, which is produced here for exactly that reason). Owns its OWN
-// CLLocationManager, same reasoning as TripLogStore.swift's header: a continuous drive trace
-// is a different concern from PlanStore's route-editor origin adoption, and PlanStore's
-// accuracy/background settings must not change for this.
+// route-snapped puck off real CLLocationManager fixes. Owns its OWN CLLocationManager, same
+// reasoning as TripLogStore.swift's header: a continuous drive trace is a different concern
+// from PlanStore's route-editor origin adoption, and PlanStore's accuracy/background settings
+// must not change for this.
+//
+// The drive HUD (wayfinder #60, ADR 0012 points 3-5) extends this with `hud`: the compact
+// drive card's ETA/remaining-distance/remaining-time/next-stop-SoC values (throttled to >=1 s
+// fix-timestamp deltas), plus `checkedStopCount`/`currentLegIndex`, the position-driven stepper
+// advancing the current Leg as stops/leg boundaries are passed, and a `.arrived` phase entered
+// on ~40 m destination arrival. Off-route replan (#61) and Trip Log wiring (#67) are still
+// later tickets, both still keyed off `distanceAlongRouteM`.
 import CoreLocation
 import Foundation
 import MapLibre
@@ -21,6 +26,7 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
     enum Phase: Equatable {
         case idle
         case driving
+        case arrived
     }
 
     /// Meaningful only while `phase == .driving`.
@@ -42,6 +48,31 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
     private(set) var distanceAlongRouteM: Double = 0
     private(set) var smoothedCourseDeg: Double = 0
 
+    /// The drive HUD's throttled display values (wayfinder #60, ADR 0012 points 3-4): nil until
+    /// `go()` computes the first (unthrottled) value. See `computeHud` and `ingest`'s throttle
+    /// comment for the update policy.
+    private(set) var hud: DriveHud?
+    /// Charging Stops passed -- an index into `stopVMs` (and `plan.stops`), not a count of
+    /// arbitrary events: ADR 0012 point 3's only stepper.
+    private(set) var checkedStopCount = 0
+    /// Leg boundaries passed -- an index into `plan.legs`/`legEndsM`, clamped to `legs.count - 1`.
+    private(set) var currentLegIndex = 0
+    /// Whether the drive card (wayfinder #60) shows its expanded SoC chart. Plain var, like
+    /// `PlanStore.cardExpanded` -- UI + drive-smoke drive it directly.
+    var driveCardExpanded = false
+
+    struct DriveHud: Equatable {
+        let etaDate: Date
+        let remainingDistM: Double
+        let remainingTimeS: Double
+        let socAtPosition: Double
+        /// The next unchecked Charging Stop's name + arrival SoC, or the destination's
+        /// (name = drive destination label, soc = the curve's final value) when none remain.
+        let nextLabel: String
+        let nextArrivalSoc: Double
+        let nextIsDestination: Bool
+    }
+
     /// ADR 0012 point 2's Go gate: origin provenance (adopted from a location fix, not
     /// overridden since) and a plan actually on screen.
     var canGo: Bool {
@@ -54,6 +85,16 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
     private var routeCumulativeM: [Double] = []
     private var lastSegmentIndex: Int?
     private var puckAnnotation: MLNPointAnnotation?
+    /// Snapshotted at `go()` for the HUD engine (wayfinder #60) -- see that method's comment.
+    private var drivePlan: FfiPlan?
+    private var stopVMs: [ChargingStopVM] = []
+    /// Cumulative leg-end distances, one entry per `drivePlan.legs`; `legEndsM.last == totalDistM`.
+    private var legEndsM: [Double] = []
+    /// Per-leg average speed (`leg.distM / leg.driveS`), 0 for a zero-duration leg.
+    private var legAvgSpeedMPerS: [Double] = []
+    /// The FIX timestamp (not wall clock) `hud` was last recomputed at -- see `ingest`'s
+    /// throttle comment for why.
+    private var lastHudFixTimestamp: Date?
 
     init(planStore: PlanStore) {
         self.planStore = planStore
@@ -78,6 +119,24 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
         distanceAlongRouteM = 0
         smoothedCourseDeg = 0
 
+        // HUD engine snapshot (wayfinder #60): the Plan struct itself (for its legs/socCurve),
+        // each Charging Stop's along-route distance (ChargingStopVM.stops(from:), same walk
+        // ResultCard/SoCChartView already use), and per-leg average speed for the
+        // remaining-time estimate -- see `computeHud`.
+        drivePlan = plan
+        stopVMs = ChargingStopVM.stops(from: plan)
+        var cumulativeLegDistM = 0.0
+        legEndsM = plan.legs.map { leg in
+            cumulativeLegDistM += leg.distM
+            return cumulativeLegDistM
+        }
+        legAvgSpeedMPerS = plan.legs.map { $0.driveS > 0 ? $0.distM / $0.driveS : 0 }
+        checkedStopCount = 0
+        currentLegIndex = 0
+        driveCardExpanded = false
+        lastHudFixTimestamp = nil
+        hud = computeHud(distanceAlongM: 0)
+
         phase = .driving
         cameraMode = .following
         planStore.mapView.showsUserLocation = false
@@ -95,11 +154,12 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
     /// The Plan and its map layers stay intact -- planning UI just returns, via RootView's
     /// phase switch.
     func end() {
-        guard phase == .driving else { return }
+        guard phase != .idle else { return }
         locationManager.stopUpdatingLocation()
         if let puckAnnotation { planStore.mapView.removeAnnotation(puckAnnotation) }
         puckAnnotation = nil
         planStore.mapView.showsUserLocation = true
+        driveCardExpanded = false
         phase = .idle
     }
 
@@ -115,6 +175,30 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
         ) else { return }
         lastSegmentIndex = result.segmentIndex
         distanceAlongRouteM = result.distanceAlongRouteM
+
+        // Position-driven stepper (ADR 0012 points 3/5, wayfinder #60): the drive's ONLY
+        // stepper. A `while`, not an `if`, in case one fix jumps past more than one stop/leg
+        // boundary (a sparse-fix gap, or a synthetic drive-smoke fix landing far along-route).
+        var advancedThisFix = false
+        while checkedStopCount < stopVMs.count, distanceAlongRouteM >= stopVMs[checkedStopCount].distFromStartM - 40 {
+            checkedStopCount += 1
+            advancedThisFix = true
+        }
+        while currentLegIndex < legEndsM.count - 1, distanceAlongRouteM >= legEndsM[currentLegIndex] - 40 {
+            currentLegIndex += 1
+            advancedThisFix = true
+        }
+
+        // Destination arrival (~40 m along-route, ADR 0012 point 3) ends the drive into an
+        // arrival state: location updates stop and the puck/camera are left exactly where they
+        // last were -- `end()` is what finally tears them down.
+        if distanceAlongRouteM >= (drivePlan?.totalDistM ?? 0) - 40 {
+            phase = .arrived
+            hud = computeHud(distanceAlongM: distanceAlongRouteM)
+            lastHudFixTimestamp = location.timestamp
+            locationManager.stopUpdatingLocation()
+            return
+        }
 
         if result.distanceFromRouteM <= 10 {
             snappedCoordinate = result.coordinate
@@ -137,6 +221,88 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
         if cameraMode == .following {
             applyFollowingCamera()
         }
+
+        // HUD throttle (ADR 0012 point 3, >=1 s UI deltas): keyed on the FIX's own timestamp,
+        // not wall-clock time, so this is deterministic for drive-smoke's synthetic fixes -- a
+        // stop/leg advance always updates immediately regardless of the throttle window.
+        let dueForHudUpdate = advancedThisFix || lastHudFixTimestamp == nil
+            || location.timestamp.timeIntervalSince(lastHudFixTimestamp!) >= 1.0
+        if dueForHudUpdate {
+            hud = computeHud(distanceAlongM: distanceAlongRouteM)
+            lastHudFixTimestamp = location.timestamp
+        }
+    }
+
+    // MARK: HUD (wayfinder #60, ADR 0012 points 3-4)
+
+    /// Recomputes the drive HUD at `distanceAlongM`: remaining distance/time from the remaining
+    /// Leg geometry, SoC read off the Plan's own predicted curve (model-driven, ADR 0012 point
+    /// 5), and the next unchecked Charging Stop (or the destination, once none remain). Also
+    /// called once from `go()` at distanceAlong=0 for the drive's initial HUD values.
+    private func computeHud(distanceAlongM: Double) -> DriveHud {
+        guard let drivePlan else {
+            return DriveHud(
+                etaDate: Date(), remainingDistM: 0, remainingTimeS: 0, socAtPosition: 0,
+                nextLabel: "", nextArrivalSoc: 0, nextIsDestination: true
+            )
+        }
+
+        let totalDistM = drivePlan.totalDistM
+        let remainingDistM = max(0, totalDistM - distanceAlongM)
+
+        let legEndM = legEndsM.indices.contains(currentLegIndex) ? legEndsM[currentLegIndex] : totalDistM
+        let avgSpeedMPerS = legAvgSpeedMPerS.indices.contains(currentLegIndex) ? legAvgSpeedMPerS[currentLegIndex] : 0
+        let remainingInLegM = max(0, legEndM - distanceAlongM)
+        let remainingInLegTimeS = avgSpeedMPerS > 0 ? remainingInLegM / avgSpeedMPerS : 0
+
+        let futureLegsTimeS = drivePlan.legs.count > currentLegIndex + 1
+            ? drivePlan.legs[(currentLegIndex + 1)...].reduce(0) { $0 + $1.driveS }
+            : 0
+        let uncheckedStopsChargeS = stopVMs.count > checkedStopCount
+            ? stopVMs[checkedStopCount...].reduce(0) { $0 + $1.chargeS }
+            : 0
+        let remainingTimeS = remainingInLegTimeS + futureLegsTimeS + uncheckedStopsChargeS
+
+        let socAtPosition = Self.interpolatedSoc(drivePlan.socCurve, at: distanceAlongM)
+
+        let nextLabel: String
+        let nextArrivalSoc: Double
+        let nextIsDestination: Bool
+        if checkedStopCount < stopVMs.count {
+            let next = stopVMs[checkedStopCount]
+            nextLabel = next.name
+            nextArrivalSoc = next.arrivalSoc
+            nextIsDestination = false
+        } else {
+            nextLabel = drivePlan.legs.last?.toLabel ?? "Destination"
+            nextArrivalSoc = drivePlan.socCurve.last?.soc ?? 0
+            nextIsDestination = true
+        }
+
+        return DriveHud(
+            etaDate: Date().addingTimeInterval(remainingTimeS), remainingDistM: remainingDistM,
+            remainingTimeS: remainingTimeS, socAtPosition: socAtPosition, nextLabel: nextLabel,
+            nextArrivalSoc: nextArrivalSoc, nextIsDestination: nextIsDestination
+        )
+    }
+
+    /// Linear interpolation of `curve` (sorted ascending by `distM`) at `distanceM`, clamped to
+    /// the curve's ends. At a charge-jump distance where two samples share `distM`, this forward
+    /// scan lands on the pre-charge sample -- fine either way, per this ticket's spec.
+    private static func interpolatedSoc(_ curve: [FfiSocPoint], at distanceM: Double) -> Double {
+        guard let first = curve.first else { return 0 }
+        guard distanceM > first.distM else { return first.soc }
+        var previous = first
+        for point in curve.dropFirst() {
+            if distanceM <= point.distM {
+                let span = point.distM - previous.distM
+                guard span > 0 else { return point.soc }
+                let t = (distanceM - previous.distM) / span
+                return previous.soc + t * (point.soc - previous.soc)
+            }
+            previous = point
+        }
+        return previous.soc
     }
 
     private static func stepCourse(current: Double, target: Double, maxStepDeg: Double) -> Double {

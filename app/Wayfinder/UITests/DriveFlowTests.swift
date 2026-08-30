@@ -7,7 +7,10 @@
 // (WayfinderUITestCase.launchApp's extraLaunchArguments): XCUITest cannot inject CoreLocation
 // fixes, so PlanStore.load() reads this launch argument and adopts it as the current-location
 // origin directly (see PlanStore.swift's e2e seam comment) -- the real CLLocationManager
-// adoption path is covered by drive-smoke and the M4-gate device drives instead.
+// adoption path is covered by drive-smoke and the M4-gate device drives instead. The drive HUD
+// card (wayfinder #60) is only checked for presence and its expand/collapse toggle here -- HUD
+// VALUE updates (ETA, remaining distance, SoC) aren't assertable from XCUITest since it can't
+// inject CoreLocation fixes; that's drive-smoke's job (its "hud-initial"/"hud-updates" asserts).
 import XCTest
 
 final class DriveFlowTests: WayfinderUITestCase {
@@ -24,6 +27,23 @@ final class DriveFlowTests: WayfinderUITestCase {
         XCTAssertTrue(waitForNonexistence(el("search-pill"), timeout: 5), "search-pill still present after entering drive")
         XCTAssertTrue(waitForNonexistence(el("settings-button"), timeout: 5), "settings-button still present after entering drive")
         XCTAssertTrue(waitForNonexistence(el("result-card"), timeout: 5), "result-card still present after entering drive")
+
+        // Drive HUD card (wayfinder #60): present once driving, its chevron expands/collapses
+        // the pinned SoC chart.
+        XCTAssertTrue(waitForExistence(el("drive-card"), timeout: 10), "drive-card never appeared after entering drive")
+        el("drive-card-toggle").tap()
+        XCTAssertTrue(waitForExistence(el("soc-chart"), timeout: 10), "soc-chart never appeared after expanding the drive card")
+
+        // Collapse back. Retry the tap a few times before concluding this is a genuine bug --
+        // same rationale as PlanFlowTests' result-card-toggle retry: a tap synthesized right as
+        // the expand spring animation is still resizing the card can miss the (moving) chevron.
+        var chartGone = false
+        for _ in 0..<3 {
+            el("drive-card-toggle").tap()
+            chartGone = waitForNonexistence(el("soc-chart"), timeout: 5)
+            if chartGone { break }
+        }
+        XCTAssertTrue(chartGone, "soc-chart still present after collapsing the drive card, even after 3 retries")
 
         // Free-look: any map gesture (a coordinate drag, like MapGestureTests) should reveal
         // the Re-center button.

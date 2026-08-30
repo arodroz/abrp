@@ -8,10 +8,11 @@
 // change) with PlanStore's persisted override via `updateAppearance(systemDark:)`. Trip Log
 // capture (wayfinder #51) adds a record button above the gear button, driven by TripLogStore's
 // own phase machine, with the two dash-SoC prompts as plain `.alert` TextFields. Drive Mode
-// core (wayfinder #59, ADR 0012 point 8) hides the planning UI entirely while
-// `driveStore.phase == .driving` -- the route editor, the settings/trip-record/locate-me
+// core (wayfinder #59, ADR 0012 point 8) hides the planning UI entirely while driving or
+// arrived (`driveStore.phase != .idle`) -- the route editor, the settings/trip-record/locate-me
 // buttons, the charger callout, and the result card -- replacing them with a bottom
-// drive-controls bar (overview toggle, End, and a conditional Re-center). Toasts stay outside
+// drive-controls bar (overview toggle, End, a conditional Re-center, and the drive HUD card,
+// wayfinder #60) while driving, and a simple arrival card once `.arrived`. Toasts stay outside
 // the phase switch so they keep working during a drive.
 import SwiftUI
 
@@ -113,7 +114,9 @@ struct RootView: View {
             )
             .ignoresSafeArea()
 
-            if driveStore.phase != .driving {
+            // Planning UI returns only at `.idle` (wayfinder #60) -- `.arrived` still hides it,
+            // same as `.driving`, until End (arrival card's "Done" button) exits the drive.
+            if driveStore.phase == .idle {
                 if !isReady {
                     statusOverlay
                 } else {
@@ -138,6 +141,8 @@ struct RootView: View {
 
             if driveStore.phase == .driving {
                 driveControlsOverlay
+            } else if driveStore.phase == .arrived {
+                arrivalOverlay
             } else {
                 VStack {
                     Spacer()
@@ -243,6 +248,43 @@ struct RootView: View {
                 }
                 driveEndButton
             }
+            .padding(.horizontal, 16)
+            .padding(.bottom, 8)
+            // The drive HUD card (wayfinder #60): nil `hud` only during the brief window
+            // between `go()` and its own initial (unthrottled) computation.
+            if driveStore.hud != nil {
+                DriveCard(store: store, driveStore: driveStore)
+            }
+        }
+    }
+
+    // MARK: Arrival (wayfinder #60, ADR 0012 point 1's arrival exit -- #62 folds the Trip Log
+    // end prompt into this later)
+
+    private var arrivalOverlay: some View {
+        VStack {
+            Spacer()
+            VStack(spacing: 8) {
+                Text("Arrived").font(.title2).bold()
+                if let hud = driveStore.hud {
+                    Text("\(hud.nextLabel) \u{00B7} arrive \(formatSocPct(hud.nextArrivalSoc))")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                }
+                Button("Done") {
+                    driveStore.end()
+                }
+                .font(.headline).bold()
+                .foregroundColor(.white)
+                .padding(.horizontal, 24)
+                .padding(.vertical, 12)
+                .background(Color.blue, in: Capsule())
+                .accessibilityIdentifier("arrival-done-button")
+            }
+            .padding(20)
+            .background(.regularMaterial)
+            .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+            .shadow(color: .black.opacity(0.2), radius: 10, y: 4)
             .padding(.horizontal, 16)
             .padding(.bottom, 8)
         }

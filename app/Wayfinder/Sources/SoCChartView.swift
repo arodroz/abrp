@@ -3,7 +3,9 @@
 // distance to PlanStore (which moves a marker on the map -- see PlanStore.updateScrubMarker).
 // Ported nearly verbatim from prototype/planner-ui's SoCChartView.swift, re-typed off
 // FfiPlan/FfiSocPoint and PlanStore's `displayedPlan` (the main plan or, toggled, the
-// stop-free alternative).
+// stop-free alternative). `pinnedDistanceM` (wayfinder #60) repurposes this same chart as the
+// drive HUD's live-position marker -- see its own comment for why the scrub gesture is
+// disabled in that mode.
 import Charts
 import PlannerKit
 import SwiftUI
@@ -12,6 +14,9 @@ struct SoCChartView: View {
     let store: PlanStore
     var height: CGFloat = 220
     var showAxes: Bool = true
+    /// Drive HUD's live snapped-position marker (wayfinder #60): when set, the white RuleMark
+    /// tracks this distance instead of `store.selectedDistanceM`.
+    var pinnedDistanceM: Double? = nil
 
     var body: some View {
         Chart {
@@ -28,7 +33,7 @@ struct SoCChartView: View {
                         .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [4, 3]))
                 }
             }
-            if let sel = store.selectedDistanceM {
+            if let sel = pinnedDistanceM ?? store.selectedDistanceM {
                 RuleMark(x: .value("Selected", sel / 1000))
                     .foregroundStyle(.white)
                     .lineStyle(StrokeStyle(lineWidth: 2))
@@ -39,19 +44,24 @@ struct SoCChartView: View {
         .chartYAxis(showAxes ? .automatic : .hidden)
         .chartOverlay { proxy in
             GeometryReader { geo in
-                Rectangle()
-                    .fill(Color.clear)
-                    .contentShape(Rectangle())
-                    .gesture(
-                        DragGesture(minimumDistance: 0)
-                            .onChanged { value in
-                                let plotFrame = geo[proxy.plotAreaFrame]
-                                let xPos = value.location.x - plotFrame.origin.x
-                                guard let distKm: Double = proxy.value(atX: xPos) else { return }
-                                let maxKm = (store.displayedPlan?.totalDistM ?? 0) / 1000
-                                store.selectedDistanceM = min(max(distKm, 0), maxKm) * 1000
-                            }
-                    )
+                // Pinned mode (wayfinder #60) installs no gesture at all: writing
+                // `store.selectedDistanceM` triggers `PlanStore.updateScrubMarker`'s
+                // `mapView.setCenter`, which would fight the following camera mid-drive.
+                if pinnedDistanceM == nil {
+                    Rectangle()
+                        .fill(Color.clear)
+                        .contentShape(Rectangle())
+                        .gesture(
+                            DragGesture(minimumDistance: 0)
+                                .onChanged { value in
+                                    let plotFrame = geo[proxy.plotAreaFrame]
+                                    let xPos = value.location.x - plotFrame.origin.x
+                                    guard let distKm: Double = proxy.value(atX: xPos) else { return }
+                                    let maxKm = (store.displayedPlan?.totalDistM ?? 0) / 1000
+                                    store.selectedDistanceM = min(max(distKm, 0), maxKm) * 1000
+                                }
+                        )
+                }
             }
         }
         .frame(height: height)

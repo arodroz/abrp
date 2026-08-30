@@ -1428,6 +1428,26 @@ enum Autotest {
         await finish(ok: ok)
     }
 
+    /// Independent linear interpolation of `curve` at `distanceM`, used only to cross-check
+    /// `DriveHud.socAtPosition` -- deliberately not calling DriveStore's own (private)
+    /// implementation, so this actually proves the HUD's math rather than just its plumbing.
+    private static func manualInterpolatedSoc(_ curve: [FfiSocPoint], at distanceM: Double) -> Double {
+        guard let first = curve.first, let last = curve.last else { return 0 }
+        if distanceM <= first.distM { return first.soc }
+        if distanceM >= last.distM { return last.soc }
+        for i in 1..<curve.count {
+            let previous = curve[i - 1]
+            let current = curve[i]
+            if distanceM <= current.distM {
+                let span = current.distM - previous.distM
+                guard span > 0 else { continue }
+                let t = (distanceM - previous.distM) / span
+                return previous.soc + t * (current.soc - previous.soc)
+            }
+        }
+        return last.soc
+    }
+
     // MARK: drive-smoke
 
     /// Drives DriveStore directly (wayfinder #59) -- no CoreLocation fix injection exists on
@@ -1582,7 +1602,115 @@ enum Autotest {
         )
         ok = ok && cameraModesOk
 
-        // Step 11.
+        // Step 11 (wayfinder #60): steps 6-10 above fed synthetic fixes all over the route
+        // (small/far offsets, a fixed course-test coordinate) to exercise snap/course math, so
+        // `distanceAlongRouteM` and the checked-stop/leg counters no longer reflect a
+        // from-scratch drive. End and re-enter (canGo already proven true after "gate-ready")
+        // so the HUD/stepper/arrival continuation below starts clean from distance 0 -- values
+        // re-derived from the plan object itself, not hardcoded stop names, since the active
+        // region on the sim may be corridor or eu-west and their goldens differ in stop sets.
+        driveStore.end()
+        driveStore.go()
+        guard let plan = store.displayedPlan else {
+            report("hud-initial", false, "no displayed plan after re-entering drive")
+            await finish(ok: false)
+        }
+
+        // "hud-initial": go()'s unthrottled initial computation.
+        let initialHud = driveStore.hud
+        let initialRemainingDistOk = initialHud.map { isClose($0.remainingDistM, plan.totalDistM, tol: 1) } ?? false
+        let initialRemainingTimeOk = initialHud.map {
+            isClose($0.remainingTimeS, plan.driveTimeS + plan.chargeTimeS, tol: 60)
+        } ?? false
+        let initialNextStopOk = plan.stops.isEmpty || initialHud?.nextLabel == plan.stops.first?.name
+        let hudInitialOk = initialHud != nil && initialRemainingDistOk && initialRemainingTimeOk && initialNextStopOk
+        report(
+            "hud-initial", hudInitialOk,
+            "hud=\(String(describing: initialHud)) totalDistM=\(plan.totalDistM) "
+                + "driveTimeS+chargeTimeS=\(plan.driveTimeS + plan.chargeTimeS)"
+        )
+        ok = ok && hudInitialOk
+
+        // Walk the polyline's cumulative distance to find vertices at/after given distances,
+        // for the throttle and stop-check-off steps below.
+        let driveCumulativeM = RouteSnap.cumulativeDistances(
+            plan.polyline.map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
+        )
+        func firstVertexIndex(atOrAfterM targetM: Double) -> Int? {
+            driveCumulativeM.firstIndex { $0 >= targetM }
+        }
+
+        let base = Date()
+        func fix(atVertex idx: Int, at time: Date) -> CLLocation {
+            let point = plan.polyline[idx]
+            return CLLocation(
+                coordinate: CLLocationCoordinate2D(latitude: point.lat, longitude: point.lon),
+                altitude: 300, horizontalAccuracy: 5, verticalAccuracy: 5, course: -1, speed: 15, timestamp: time
+            )
+        }
+
+        // Step: throttle. Fix A ~2 km in at T, fix B one vertex later at T+0.2s (hud unchanged),
+        // fix C another vertex later at T+1.5s (hud updated).
+        guard let vertexA = firstVertexIndex(atOrAfterM: 2000), vertexA + 2 < plan.polyline.count else {
+            report("hud-throttled", false, "polyline too short for the throttle step")
+            report("hud-updates", false, "polyline too short for the throttle step")
+            await finish(ok: false)
+        }
+        driveStore.ingest(fix(atVertex: vertexA, at: base))
+        let hudAfterA = driveStore.hud
+
+        driveStore.ingest(fix(atVertex: vertexA + 1, at: base.addingTimeInterval(0.2)))
+        let hudAfterB = driveStore.hud
+        let throttledOk = hudAfterA == hudAfterB
+        report("hud-throttled", throttledOk, "hudAfterA=\(String(describing: hudAfterA)) hudAfterB=\(String(describing: hudAfterB))")
+        ok = ok && throttledOk
+
+        driveStore.ingest(fix(atVertex: vertexA + 2, at: base.addingTimeInterval(1.5)))
+        let hudAfterC = driveStore.hud
+        let expectedSocAtC = manualInterpolatedSoc(plan.socCurve, at: driveStore.distanceAlongRouteM)
+        let socCloseOk = hudAfterC.map { isClose($0.socAtPosition, expectedSocAtC, tol: 0.005) } ?? false
+        let distDecreasedOk = (hudAfterC?.remainingDistM ?? .infinity) < (hudAfterB?.remainingDistM ?? -.infinity)
+        let updatesOk = hudAfterC != hudAfterB && distDecreasedOk && socCloseOk
+        report(
+            "hud-updates", updatesOk,
+            "hudAfterB=\(String(describing: hudAfterB)) hudAfterC=\(String(describing: hudAfterC)) "
+                + "expectedSoc=\(expectedSocAtC)"
+        )
+        ok = ok && updatesOk
+
+        // Step: stop check-off, only meaningful if the plan has stops.
+        let stops = ChargingStopVM.stops(from: plan)
+        if stops.isEmpty {
+            report("stop-checked", true, "no stops in plan")
+        } else if let firstStop = stops.first, let stopVertex = firstVertexIndex(atOrAfterM: firstStop.distFromStartM + 100) {
+            driveStore.ingest(fix(atVertex: stopVertex, at: base.addingTimeInterval(3)))
+            let checkedOk = driveStore.checkedStopCount == 1
+            let nextOk = stops.count == 1
+                ? driveStore.hud?.nextIsDestination == true
+                : driveStore.hud?.nextLabel == stops[1].name
+            let legAdvancedOk = driveStore.currentLegIndex >= 1
+            let stopCheckedOk = checkedOk && nextOk && legAdvancedOk
+            report(
+                "stop-checked", stopCheckedOk,
+                "checkedStopCount=\(driveStore.checkedStopCount) hud=\(String(describing: driveStore.hud)) "
+                    + "currentLegIndex=\(driveStore.currentLegIndex)"
+            )
+            ok = ok && stopCheckedOk
+        } else {
+            report("stop-checked", false, "no polyline vertex found past the first stop's distance")
+            ok = false
+        }
+
+        // Step: arrival -- feed the last polyline vertex.
+        driveStore.ingest(fix(atVertex: plan.polyline.count - 1, at: base.addingTimeInterval(5)))
+        let arrivalOk = driveStore.phase == .arrived && (driveStore.hud?.remainingDistM ?? .infinity) <= 40
+        report(
+            "arrival", arrivalOk,
+            "phase=\(driveStore.phase) remainingDistM=\(String(describing: driveStore.hud?.remainingDistM))"
+        )
+        ok = ok && arrivalOk
+
+        // Step: end from arrived.
         driveStore.end()
         let endOk = driveStore.phase == .idle && store.plan != nil && store.mapView.showsUserLocation
         report(
@@ -1591,7 +1719,7 @@ enum Autotest {
         )
         ok = ok && endOk
 
-        // Step 12: re-entry guard -- a long-press origin override closes the gate again.
+        // Step: re-entry guard -- a long-press origin override closes the gate again.
         store.setOrigin(CLLocationCoordinate2D(latitude: 49.7, longitude: 6.2))
         report("gate-overridden", driveStore.canGo == false, "canGo=\(driveStore.canGo)")
         ok = ok && driveStore.canGo == false
