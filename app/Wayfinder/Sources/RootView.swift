@@ -42,12 +42,17 @@ struct RootView: View {
                 store.updateAppearance(systemDark: newValue == .dark)
             }
             .onChange(of: store.planVersion) { _, _ in
-                if let plan = store.plan {
+                // Gated to idle (wayfinder #61): a mid-drive silent replan must not yank the
+                // following camera out from under the driver.
+                if driveStore.phase == .idle, let plan = store.plan {
                     RouteLayer.fitToRoute(mapView: store.mapView, plan: plan)
                 }
             }
             .onChange(of: store.planErrorVersion) { _, _ in
                 if let message = store.planErrorMessage { showToast(message) }
+            }
+            .onChange(of: driveStore.routeUpdatedVersion) { _, _ in
+                showToast("Route updated")
             }
             .onChange(of: tripStore.captureErrorVersion) { _, _ in
                 if let message = tripStore.captureErrorMessage { showToast(message) }

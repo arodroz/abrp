@@ -645,17 +645,42 @@ final class PlanStore: NSObject, @preconcurrency MLNMapViewDelegate, @preconcurr
     }
 
     /// Replans from the current route editor state. Every route edit calls this; each call
-    /// cancels the previous in-flight plan and lands only if it's still the latest.
-    ///
+    /// cancels the previous in-flight plan and lands only if it's still the latest. Thin wrapper
+    /// over `runGuardedReplan` -- fire-and-forget, since no editor call site awaits a plan.
+    private func replan() {
+        Task { _ = await runGuardedReplan() }
+    }
+
+    /// ADR 0012 point 6's replan-from-position entry (wayfinder #61): called by DriveStore when
+    /// a sustained off-route deviation calls for a silent replan. `coordinate` (the deviated
+    /// fix) becomes the new origin, adopted the same way a location fix normally is --
+    /// `originOverridden` is reset to false, not set true, because the deviated position IS the
+    /// current location, so the Go gate (`originIsCurrentLocation`) stays truthful after End.
+    /// `waypoints` is filtered down to `keepingWaypointIds` (stops not yet reached); the
+    /// destination is untouched. `departSoc` is passed through as `runGuardedReplan`'s override,
+    /// deliberately NOT written to the settings-bound `departSoc` property -- that slider must
+    /// keep reflecting the user's configured start-of-trip SoC, not the model's live estimate.
+    func replanForDrive(
+        from coordinate: CLLocationCoordinate2D, keepingWaypointIds: Set<EditorWaypoint.ID>, departSoc: Double
+    ) async -> FfiPlan? {
+        originCoordinate = coordinate
+        originName = "Your location"
+        hasSetOriginFromLocationFix = true
+        originOverridden = false
+        waypoints = waypoints.filter { keepingWaypointIds.contains($0.id) }
+        return await runGuardedReplan(departSocOverride: departSoc)
+    }
+
     /// IMPORTANT: `client.cancel()` is a latency optimisation only, not a correctness
     /// mechanism. `Planner::plan` resets the cancel flag at entry (core/ffi/src/planner.rs),
     /// so a superseded call can still COMPLETE normally if it never observes the flag before
     /// the next call resets it -- including racing back in as a stale success after a newer
     /// call has already landed. Correctness rests entirely on the generation guard below: any
     /// result or error arriving with `gen != generation` is dropped, including a superseded
-    /// call's own `Cancelled` error.
-    private func replan() {
-        guard let destination, plannerStatus == .ready, let client else { return }
+    /// call's own `Cancelled` error. Returns the landed `FfiPlan` on success, `nil` on failure or
+    /// when superseded before landing.
+    private func runGuardedReplan(departSocOverride: Double? = nil) async -> FfiPlan? {
+        guard let destination, plannerStatus == .ready, let client else { return nil }
 
         generation += 1
         let gen = generation
@@ -668,7 +693,7 @@ final class PlanStore: NSObject, @preconcurrency MLNMapViewDelegate, @preconcurr
             waypoints: waypoints.map {
                 FfiWaypoint(lat: $0.coordinate.latitude, lon: $0.coordinate.longitude, departSocOverride: nil)
             },
-            departSoc: departSoc,
+            departSoc: departSocOverride ?? departSoc,
             arrivalMinSoc: arrivalMinSoc,
             chargerArrivalMinSoc: chargerArrivalMinSoc,
             chargerMaxSoc: chargerMaxSoc,
@@ -681,25 +706,25 @@ final class PlanStore: NSObject, @preconcurrency MLNMapViewDelegate, @preconcurr
             referenceConsumptionWhPerKm: referenceConsumptionWhPerKm
         )
 
-        Task {
-            do {
-                let result = try await client.plan(request)
-                guard gen == self.generation else { return }
-                self.plan = result
-                showingAlternative = false
-                selectedDistanceM = nil
-                if let style = mapView.style {
-                    RouteLayer.addLayers(to: style, plan: result)
-                }
-                planVersion += 1
-                isPlanning = false
-            } catch {
-                guard gen == self.generation else { return }
-                // Leave the previous plan and its layers on screen.
-                planErrorMessage = Self.userMessage(for: error)
-                planErrorVersion += 1
-                isPlanning = false
+        do {
+            let result = try await client.plan(request)
+            guard gen == self.generation else { return nil }
+            self.plan = result
+            showingAlternative = false
+            selectedDistanceM = nil
+            if let style = mapView.style {
+                RouteLayer.addLayers(to: style, plan: result)
             }
+            planVersion += 1
+            isPlanning = false
+            return result
+        } catch {
+            guard gen == self.generation else { return nil }
+            // Leave the previous plan and its layers on screen.
+            planErrorMessage = Self.userMessage(for: error)
+            planErrorVersion += 1
+            isPlanning = false
+            return nil
         }
     }
 

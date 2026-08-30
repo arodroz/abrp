@@ -9,8 +9,14 @@
 // drive card's ETA/remaining-distance/remaining-time/next-stop-SoC values (throttled to >=1 s
 // fix-timestamp deltas), plus `checkedStopCount`/`currentLegIndex`, the position-driven stepper
 // advancing the current Leg as stops/leg boundaries are passed, and a `.arrived` phase entered
-// on ~40 m destination arrival. Off-route replan (#61) and Trip Log wiring (#67) are still
-// later tickets, both still keyed off `distanceAlongRouteM`.
+// on ~40 m destination arrival.
+//
+// Off-route detection + silent replan (wayfinder #61, ADR 0012 point 6) extends this further: a
+// sustained (>=5 s) 50+ m deviation from the displayed route triggers `PlanStore.replanForDrive`
+// from the deviated position, and a landed result is swapped in via the same HUD/geometry
+// snapshot `go()` uses -- automatic, silent, no camera yank (RootView gates its fit-to-route on
+// `phase == .idle`), just a brief "Route updated" toast off `routeUpdatedVersion`. Trip Log
+// wiring (#67) is still a later ticket, also keyed off `distanceAlongRouteM`.
 import CoreLocation
 import Foundation
 import MapLibre
@@ -60,6 +66,8 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
     /// Whether the drive card (wayfinder #60) shows its expanded SoC chart. Plain var, like
     /// `PlanStore.cardExpanded` -- UI + drive-smoke drive it directly.
     var driveCardExpanded = false
+    /// Bumped when an off-route replan (wayfinder #61) lands; RootView's toast trigger.
+    private(set) var routeUpdatedVersion = 0
 
     struct DriveHud: Equatable {
         let etaDate: Date
@@ -95,6 +103,21 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
     /// The FIX timestamp (not wall clock) `hud` was last recomputed at -- see `ingest`'s
     /// throttle comment for why.
     private var lastHudFixTimestamp: Date?
+    /// The FIX timestamp (not wall clock, same reasoning as the HUD throttle) the current
+    /// off-route excursion started at; `nil` while on-route or between excursions.
+    private var offRouteSinceFixTimestamp: Date?
+    /// Set for the duration of an in-flight off-route replan so a second sustained excursion
+    /// (or a lingering one) can't fire a redundant `replanForDrive` call.
+    private var replanInFlight = false
+    /// Incremented in `go()`. An in-flight replan's landed result is adopted only if the
+    /// session it was triggered in is still current AND `phase == .driving` -- insurance
+    /// against End-then-Go racing an in-flight replan from the previous drive.
+    private var driveSession = 0
+
+    /// ADR 0012 point 6's off-route calibration: a lateral deviation past this, sustained for
+    /// `offRouteSustainedS`, triggers a silent replan-from-position.
+    private static let offRouteThresholdM = 50.0
+    private static let offRouteSustainedS = 5.0
 
     init(planStore: PlanStore) {
         self.planStore = planStore
@@ -105,37 +128,20 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
 
     // MARK: Lifecycle
 
-    /// Snapshots the displayed Plan's polyline at entry. A replan landing mid-drive can't
-    /// diverge the drive in this slice -- the planning UI is hidden while driving, and
-    /// off-route replans are ticket #61 -- so a stale snapshot is fine here.
+    /// Snapshots the displayed Plan's polyline and HUD engine state at entry via `snapshotPlan`
+    /// (shared with the off-route replan swap, wayfinder #61 -- see that method's adopt comment
+    /// for what it deliberately leaves untouched), plus this method's own phase-entry work.
     func go() {
         guard canGo, let plan = planStore.displayedPlan else { return }
 
-        routePolyline = plan.polyline.map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
-        routeCumulativeM = RouteSnap.cumulativeDistances(routePolyline)
-        lastSegmentIndex = nil
+        snapshotPlan(plan)
         snappedCoordinate = nil
         isOnRoute = false
-        distanceAlongRouteM = 0
         smoothedCourseDeg = 0
-
-        // HUD engine snapshot (wayfinder #60): the Plan struct itself (for its legs/socCurve),
-        // each Charging Stop's along-route distance (ChargingStopVM.stops(from:), same walk
-        // ResultCard/SoCChartView already use), and per-leg average speed for the
-        // remaining-time estimate -- see `computeHud`.
-        drivePlan = plan
-        stopVMs = ChargingStopVM.stops(from: plan)
-        var cumulativeLegDistM = 0.0
-        legEndsM = plan.legs.map { leg in
-            cumulativeLegDistM += leg.distM
-            return cumulativeLegDistM
-        }
-        legAvgSpeedMPerS = plan.legs.map { $0.driveS > 0 ? $0.distM / $0.driveS : 0 }
-        checkedStopCount = 0
-        currentLegIndex = 0
         driveCardExpanded = false
-        lastHudFixTimestamp = nil
-        hud = computeHud(distanceAlongM: 0)
+        offRouteSinceFixTimestamp = nil
+        replanInFlight = false
+        driveSession += 1
 
         phase = .driving
         cameraMode = .following
@@ -149,6 +155,33 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
         locationManager.activityType = .automotiveNavigation
         locationManager.requestWhenInUseAuthorization()
         locationManager.startUpdatingLocation()
+    }
+
+    /// HUD/geometry snapshot shared by `go()` (full entry) and the off-route replan swap
+    /// (`triggerOffRouteReplan`'s completion, wayfinder #61): the Plan struct itself (for its
+    /// legs/socCurve), each Charging Stop's along-route distance (ChargingStopVM.stops(from:),
+    /// same walk ResultCard/SoCChartView already use), and per-leg average speed for the
+    /// remaining-time estimate -- see `computeHud`. Deliberately does NOT touch
+    /// phase/cameraMode/puck/smoothedCourseDeg -- those survive an off-route swap; the next fix
+    /// re-snaps against the new geometry.
+    private func snapshotPlan(_ plan: FfiPlan) {
+        routePolyline = plan.polyline.map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
+        routeCumulativeM = RouteSnap.cumulativeDistances(routePolyline)
+        lastSegmentIndex = nil
+        distanceAlongRouteM = 0
+
+        drivePlan = plan
+        stopVMs = ChargingStopVM.stops(from: plan)
+        var cumulativeLegDistM = 0.0
+        legEndsM = plan.legs.map { leg in
+            cumulativeLegDistM += leg.distM
+            return cumulativeLegDistM
+        }
+        legAvgSpeedMPerS = plan.legs.map { $0.driveS > 0 ? $0.distM / $0.driveS : 0 }
+        checkedStopCount = 0
+        currentLegIndex = 0
+        lastHudFixTimestamp = nil
+        hud = computeHud(distanceAlongM: 0)
     }
 
     /// The Plan and its map layers stay intact -- planning UI just returns, via RootView's
@@ -208,6 +241,22 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
             isOnRoute = false
         }
 
+        // Off-route detection (ADR 0012 point 6, wayfinder #61): a sustained deviation triggers
+        // a silent replan-from-position. Keyed on FIX timestamps, not wall-clock time -- same
+        // determinism reasoning as the HUD throttle below.
+        if result.distanceFromRouteM >= Self.offRouteThresholdM, !replanInFlight {
+            if let since = offRouteSinceFixTimestamp {
+                if location.timestamp.timeIntervalSince(since) >= Self.offRouteSustainedS {
+                    triggerOffRouteReplan(from: location)
+                }
+            } else {
+                offRouteSinceFixTimestamp = location.timestamp
+            }
+        }
+        if result.distanceFromRouteM < Self.offRouteThresholdM {
+            offRouteSinceFixTimestamp = nil
+        }
+
         // Capped course smoothing (ADR 0012 point 3): move toward the target heading along the
         // shortest arc, capped at +/-45 deg per fix, so a noisy/absent course reading never
         // snaps the camera instantly. `location.course` is negative when invalid, in which case
@@ -230,6 +279,41 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
         if dueForHudUpdate {
             hud = computeHud(distanceAlongM: distanceAlongRouteM)
             lastHudFixTimestamp = location.timestamp
+        }
+    }
+
+    // MARK: Off-route replan (wayfinder #61, ADR 0012 point 6)
+
+    /// Fires once a deviation has been sustained past `offRouteSustainedS`. Computes the
+    /// departure SoC from the Plan's own predicted curve at the current position (model-driven,
+    /// not the settings slider) and the set of waypoints still ahead -- snapped against the OLD
+    /// `routePolyline` (the new one doesn't exist yet); a waypoint that fails to snap is kept
+    /// rather than silently dropped. Adopts the landed plan on completion only if this drive
+    /// session is still current and still driving -- see `driveSession`'s comment.
+    private func triggerOffRouteReplan(from location: CLLocation) {
+        guard let drivePlan else { return }
+        replanInFlight = true
+        offRouteSinceFixTimestamp = nil
+
+        let departSoc = Self.interpolatedSoc(drivePlan.socCurve, at: distanceAlongRouteM)
+        let currentDistanceAlongRouteM = distanceAlongRouteM
+        let keepingWaypointIds = Set(planStore.waypoints.filter { waypoint in
+            guard let snap = RouteSnap.snap(
+                fix: waypoint.coordinate, polyline: routePolyline, cumulativeM: routeCumulativeM, hintSegment: nil
+            ) else { return true }
+            return snap.distanceAlongRouteM > currentDistanceAlongRouteM
+        }.map(\.id))
+        let session = driveSession
+
+        Task {
+            let result = await planStore.replanForDrive(
+                from: location.coordinate, keepingWaypointIds: keepingWaypointIds, departSoc: departSoc
+            )
+            if let result, phase == .driving, session == driveSession {
+                snapshotPlan(result)
+                routeUpdatedVersion += 1
+            }
+            replanInFlight = false
         }
     }
 

@@ -53,7 +53,13 @@
 // following, on-route snap + progress on exact polyline vertices, the snap
 // pulling in a small (3-10 m) off-route offset while a 300 m offset stays
 // raw, capped course smoothing, and the four camera-mode transitions
-// (free-look on gesture, recenter, overview, overview back to following).
+// (free-look on gesture, recenter, overview, overview back to following). Its
+// final steps (wayfinder #61, ADR 0012 point 6) prove off-route detection +
+// silent replan: a single noisy excursion doesn't fire one, a sustained (>=5
+// s) 50+ m deviation does, the landed plan departs from the deviated
+// position at the model's own predicted SoC (not the settings slider), and
+// the drive survives the swap with the snap engine re-snapping against the
+// new geometry on the very next fix.
 import CoreLocation
 import CryptoKit
 import Darwin
@@ -1719,7 +1725,121 @@ enum Autotest {
         )
         ok = ok && endOk
 
-        // Step: re-entry guard -- a long-press origin override closes the gate again.
+        // Step 12 (wayfinder #61): off-route detection + silent replan-from-position. Re-enter
+        // drive (origin still adopted, plan still displayed from the steps above -- canGo
+        // holds) and build a truly perpendicular 60 m offset off the segment at ~2 km along, in
+        // the same local equirectangular plane RouteSnap.snap projects into.
+        driveStore.go()
+        guard let plan61 = store.displayedPlan else {
+            report("offroute-noise", false, "no displayed plan after re-entering drive for step 12")
+            await finish(ok: false)
+        }
+        let cumulative61 = RouteSnap.cumulativeDistances(
+            plan61.polyline.map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
+        )
+        guard let vertexIdx61 = cumulative61.firstIndex(where: { $0 >= 2000 }), vertexIdx61 + 1 < plan61.polyline.count else {
+            report("offroute-noise", false, "polyline too short for step 12's offset")
+            await finish(ok: false)
+        }
+        let a61 = plan61.polyline[vertexIdx61]
+        let b61 = plan61.polyline[vertexIdx61 + 1]
+        let midLat61 = (a61.lat + b61.lat) / 2
+        let midLon61 = (a61.lon + b61.lon) / 2
+        let cosMidLat61 = cos(midLat61 * .pi / 180)
+        let vx61 = b61.lon * cosMidLat61 - a61.lon * cosMidLat61
+        let vy61 = b61.lat - a61.lat
+        let vLen61 = (vx61 * vx61 + vy61 * vy61).squareRoot()
+        let nx61 = -vy61 / vLen61
+        let ny61 = vx61 / vLen61
+        let offsetCoordinate61 = CLLocationCoordinate2D(
+            latitude: midLat61 + (60.0 / 111_320.0) * ny61,
+            longitude: midLon61 + (60.0 / 111_320.0) * nx61 / cosMidLat61
+        )
+        let midCoordinate61 = CLLocationCoordinate2D(latitude: midLat61, longitude: midLon61)
+        let base61 = Date()
+        func offsetFix61(at time: Date) -> CLLocation {
+            CLLocation(
+                coordinate: offsetCoordinate61, altitude: 300, horizontalAccuracy: 5, verticalAccuracy: 5,
+                course: -1, speed: 15, timestamp: time
+            )
+        }
+
+        // "offroute-noise": a single GPS-noise excursion, back on-route before the 5 s sustain
+        // bar, must not fire a replan.
+        let planVersionBefore61 = store.planVersion
+        driveStore.ingest(offsetFix61(at: base61))
+        driveStore.ingest(CLLocation(
+            coordinate: midCoordinate61, altitude: 300, horizontalAccuracy: 5, verticalAccuracy: 5,
+            course: -1, speed: 15, timestamp: base61.addingTimeInterval(1)
+        ))
+        let noiseOk = driveStore.routeUpdatedVersion == 0 && store.planVersion == planVersionBefore61
+            && driveStore.phase == .driving
+        report(
+            "offroute-noise", noiseOk,
+            "routeUpdatedVersion=\(driveStore.routeUpdatedVersion) planVersion=\(store.planVersion) phase=\(driveStore.phase)"
+        )
+        ok = ok && noiseOk
+
+        // "offroute-replan": the SAME offset sustained across the 5 s bar (window opens at
+        // +2s, +7.5s crosses it) must fire exactly one silent replan.
+        driveStore.ingest(offsetFix61(at: base61.addingTimeInterval(2)))
+        driveStore.ingest(offsetFix61(at: base61.addingTimeInterval(4)))
+        driveStore.ingest(offsetFix61(at: base61.addingTimeInterval(6)))
+        driveStore.ingest(offsetFix61(at: base61.addingTimeInterval(7.5)))
+        let expectedSoc61 = manualInterpolatedSoc(plan61.socCurve, at: driveStore.distanceAlongRouteM)
+
+        let replanLanded61 = await waitWithTimeout(seconds: 30) { driveStore.routeUpdatedVersion == 1 }
+        let replanOk = replanLanded61 && store.planVersion > planVersionBefore61 && driveStore.phase == .driving
+        report(
+            "offroute-replan", replanOk,
+            "routeUpdatedVersion=\(driveStore.routeUpdatedVersion) planVersion=\(store.planVersion) "
+                + "planVersionBefore=\(planVersionBefore61) phase=\(driveStore.phase)"
+        )
+        ok = ok && replanOk
+
+        // "offroute-origin-soc": the replan departs from the deviated position at the model's
+        // own predicted SoC, not the settings slider.
+        guard let newPlan61 = store.displayedPlan else {
+            report("offroute-origin-soc", false, "no displayed plan after off-route replan")
+            await finish(ok: false)
+        }
+        let newOriginDistM61 = newPlan61.polyline.first.map {
+            CLLocation(latitude: $0.lat, longitude: $0.lon)
+                .distance(from: CLLocation(latitude: offsetCoordinate61.latitude, longitude: offsetCoordinate61.longitude))
+        } ?? .infinity
+        let originSocOk = newOriginDistM61 <= 300
+            && (newPlan61.socCurve.first.map { isClose($0.soc, expectedSoc61, tol: 0.02) } ?? false)
+        report(
+            "offroute-origin-soc", originSocOk,
+            "newOriginDistM=\(newOriginDistM61) newSoc=\(String(describing: newPlan61.socCurve.first?.soc)) "
+                + "expectedSoc=\(expectedSoc61)"
+        )
+        ok = ok && originSocOk
+
+        // "offroute-survives": the drive itself keeps running through the swap (HUD present,
+        // stepper reset for the new geometry), and the snap engine runs against the NEW
+        // polyline for the very next fix.
+        let survivesInitialOk = driveStore.hud != nil && driveStore.checkedStopCount == 0 && driveStore.distanceAlongRouteM == 0
+        let newGeometryVertex61 = newPlan61.polyline[min(10, newPlan61.polyline.count - 1)]
+        driveStore.ingest(CLLocation(
+            coordinate: CLLocationCoordinate2D(latitude: newGeometryVertex61.lat, longitude: newGeometryVertex61.lon),
+            altitude: 300, horizontalAccuracy: 5, verticalAccuracy: 5, course: -1, speed: 15,
+            timestamp: base61.addingTimeInterval(9)
+        ))
+        let survivesOk = survivesInitialOk && driveStore.isOnRoute && driveStore.distanceAlongRouteM > 0
+        report(
+            "offroute-survives", survivesOk,
+            "hud=\(driveStore.hud != nil) checkedStopCount=\(driveStore.checkedStopCount) "
+                + "isOnRoute=\(driveStore.isOnRoute) distanceAlongRouteM=\(driveStore.distanceAlongRouteM)"
+        )
+        ok = ok && survivesOk
+
+        driveStore.end()
+
+        // Step: re-entry guard -- a long-press origin override closes the gate again. Note the
+        // off-route replan above reset `originOverridden` to false (it adopts the deviated fix
+        // like any other current-location origin), so this override still flips it back to
+        // true -- unchanged semantics from before #61.
         store.setOrigin(CLLocationCoordinate2D(latitude: 49.7, longitude: 6.2))
         report("gate-overridden", driveStore.canGo == false, "canGo=\(driveStore.canGo)")
         ok = ok && driveStore.canGo == false
