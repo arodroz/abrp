@@ -101,7 +101,9 @@ struct SettingsForm: View {
                 Section("Battery") {
                     VStack(alignment: .leading) {
                         Text("Departure SoC: \(formatSocPct(store.departSoc))")
+                            .accessibilityIdentifier("departure-soc-label")
                         Slider(value: $store.departSoc, in: 0.1...1.0)
+                            .accessibilityIdentifier("departure-soc-slider")
                     }
                     VStack(alignment: .leading) {
                         Text("Destination Arrival SoC: \(formatSocPct(store.arrivalMinSoc))")
@@ -172,6 +174,7 @@ struct SettingsForm: View {
                         Text("Dark").tag("dark")
                     }
                     .pickerStyle(.segmented)
+                    .accessibilityIdentifier("appearance-picker")
                 }
             }
             .navigationTitle("Settings")
@@ -216,6 +219,7 @@ struct SettingsForm: View {
                 Image(systemName: "square.and.arrow.up")
             }
             Button("Delete", role: .destructive) { pendingDeleteTripLogURL = url }
+                .accessibilityIdentifier("trip-log-delete-button")
         }
         .buttonStyle(.borderless)
     }

@@ -55,5 +55,6 @@ struct SoCChartView: View {
             }
         }
         .frame(height: height)
+        .accessibilityIdentifier("soc-chart")
     }
 }

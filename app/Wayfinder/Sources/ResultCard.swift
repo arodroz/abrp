@@ -18,6 +18,10 @@ struct ResultCard: View {
                 .frame(width: 36, height: 5)
                 .frame(maxWidth: .infinity)
                 .padding(.top, 8)
+                // On this leaf shape (no descendants) rather than the card's outer VStack --
+                // see the container's own comment below for why an ancestor identifier isn't
+                // safe here.
+                .accessibilityIdentifier("result-card")
 
             summary
 
@@ -59,6 +63,11 @@ struct ResultCard: View {
                     }
                 }
         )
+        // No identifier on this container: it wraps `summary`'s own "result-card-toggle"
+        // Button, and tagging an ancestor here overrides/shadows that descendant's specific
+        // identifier instead of just tagging the container (same failure mode documented on
+        // search-pill/routeEditorCard's row) -- "result-card-toggle" existing is itself proof
+        // the result card is showing, so no separate container identifier is needed.
     }
 
     private var summary: some View {
@@ -85,6 +94,7 @@ struct ResultCard: View {
                     .foregroundColor(.secondary)
                     .padding(8)
             }
+            .accessibilityIdentifier("result-card-toggle")
         }
         .padding(.horizontal, 16)
         .padding(.top, 4)
@@ -162,6 +172,7 @@ struct ResultCard: View {
                 row(title: "Destination", subtitle: "Arrive at \(formatSocPct(plan.socCurve.last?.soc ?? 0))")
             }
         }
+        .accessibilityIdentifier("itinerary")
     }
 
     private func row(title: String, subtitle: String) -> some View {

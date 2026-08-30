@@ -45,3 +45,32 @@ targets:
         product: PlannerKit
       - package: MapLibre
         product: MapLibre
+
+  WayfinderUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: UITests
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.anteras.wayfinder.uitests
+        DEVELOPMENT_TEAM: 2V28CD5VJY
+        CODE_SIGN_STYLE: Automatic
+        SWIFT_VERSION: "6.0"
+    dependencies:
+      - target: Wayfinder
+
+schemes:
+  Wayfinder:
+    build:
+      targets:
+        Wayfinder: all
+        WayfinderUITests: [test]
+    test:
+      targets:
+        - WayfinderUITests
+    run:
+      config: Debug
+    archive:
+      config: Release

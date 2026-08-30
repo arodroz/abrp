@@ -61,6 +61,11 @@ struct RouteEditorView: View {
         HStack(spacing: 10) {
             Image(systemName: "magnifyingglass")
                 .foregroundColor(.secondary)
+                // On the container this identifier would spread across every distinct
+                // accessibility element inside (Image/TextField/Cancel button, depending on
+                // expand state) instead of tagging one -- putting it on this always-present
+                // icon keeps it a single, stable lookup target regardless of state.
+                .accessibilityIdentifier("search-pill")
             if searchExpanded {
                 TextField(searchMode == .addStop ? "Add stop" : "Search destination", text: $searchModel.query)
                     .focused($searchFocused)
@@ -141,6 +146,7 @@ struct RouteEditorView: View {
                     .padding(.vertical, 8)
                 }
                 .buttonStyle(.plain)
+                .accessibilityIdentifier("recent-\(recent.name)")
                 if recent.id != recents.last?.id {
                     Divider().padding(.leading, 14)
                 }
@@ -216,15 +222,24 @@ struct RouteEditorView: View {
             if cardExpanded {
                 Divider()
                 List {
-                    row(icon: "circle.fill", iconColor: .blue, title: store.originName)
+                    row(icon: "circle.fill", iconColor: .blue, title: store.originName, identifier: "route-origin-row")
                     ForEach(store.waypoints) { waypoint in
-                        row(icon: "smallcircle.filled.circle", iconColor: .orange, title: waypoint.name) {
-                            store.removeWaypoint(id: waypoint.id)
-                        }
+                        row(
+                            icon: "smallcircle.filled.circle", iconColor: .orange, title: waypoint.name,
+                            identifier: "route-waypoint-row-\(waypoint.name)"
+                        )
                     }
+                    // Native edit-mode delete controls, not a custom in-row xmark Button: the
+                    // forced-active editMode below flattens each row into ONE accessibility
+                    // element and absorbs taps on nested custom controls, which left the old
+                    // xmark both dead to taps and invisible to VoiceOver/UI automation --
+                    // caught by the first UI e2e run (PlanFlowTests.testWaypointAddRemove).
+                    .onDelete { store.removeWaypoints(atOffsets: $0) }
                     .onMove { store.moveWaypoints(fromOffsets: $0, toOffset: $1) }
-                    row(icon: "mappin.circle.fill", iconColor: .red, title: store.destination?.name ?? "")
-                    addStopRow
+                    row(
+                        icon: "mappin.circle.fill", iconColor: .red, title: store.destination?.name ?? "",
+                        identifier: "route-destination-row"
+                    )
                 }
                 .listStyle(.plain)
                 .environment(\.editMode, .constant(.active))
@@ -232,29 +247,36 @@ struct RouteEditorView: View {
                 .scrollDisabled(true)
                 // List's own row height (not just this row's content padding) drives this --
                 // measured empirically at ~65pt/row on the simulator.
-                .frame(height: CGFloat(store.waypoints.count + 3) * 70)
+                .frame(height: CGFloat(store.waypoints.count + 2) * 70)
+                // OUTSIDE the List: the forced-active editMode above (needed for the Waypoint
+                // rows' drag-reorder handles) makes the List absorb taps on nested custom
+                // Buttons before their action runs, which left this row completely dead in the
+                // UI -- caught by the first UI e2e run (PlanFlowTests.testWaypointAddRemove).
+                // As an ordinary sibling button it is out of the edit-mode List's reach.
+                Divider().padding(.leading, 14)
+                addStopRow
             }
         }
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         .shadow(color: .black.opacity(0.15), radius: 6, y: 2)
+        // `.contain` keeps the card a real accessibility container: without it, identifying
+        // this plain VStack swallows the identifiers of non-List children (the add-stop row,
+        // now a direct sibling of the List), hiding them from UI automation.
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("route-editor-card")
     }
 
-    /// One origin/Waypoint/destination row. `onDelete` is nil for origin/destination -- only
-    /// Waypoints can be removed.
-    private func row(icon: String, iconColor: Color, title: String, onDelete: (() -> Void)? = nil) -> some View {
+    /// One origin/Waypoint/destination row. Waypoint deletion is the ForEach's native
+    /// edit-mode `.onDelete` control, not part of the row (see the comment there).
+    private func row(icon: String, iconColor: Color, title: String, identifier: String) -> some View {
         HStack(spacing: 10) {
             Image(systemName: icon).font(.caption2).foregroundColor(iconColor)
             Text(title).font(.subheadline).lineLimit(1)
             Spacer()
-            if let onDelete {
-                Button(action: onDelete) {
-                    Image(systemName: "xmark.circle.fill").foregroundColor(.secondary)
-                }
-                .buttonStyle(.plain)
-            }
         }
         .padding(.vertical, 4)
         .listRowBackground(Color.clear)
+        .accessibilityIdentifier(identifier)
     }
 
     private var addStopRow: some View {
@@ -268,9 +290,10 @@ struct RouteEditorView: View {
                 Text("Add stop").font(.subheadline).foregroundColor(.blue)
                 Spacer()
             }
-            .padding(.vertical, 4)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
         }
         .buttonStyle(.plain)
-        .listRowBackground(Color.clear)
+        .accessibilityIdentifier("add-stop-row")
     }
 }

@@ -201,6 +201,7 @@ struct RootView: View {
                 .background(.regularMaterial, in: Circle())
                 .shadow(color: .black.opacity(0.2), radius: 4, y: 2)
         }
+        .accessibilityIdentifier("locate-me-button")
     }
 
     private var settingsButton: some View {
@@ -214,6 +215,7 @@ struct RootView: View {
                 .background(.regularMaterial, in: Circle())
                 .shadow(color: .black.opacity(0.2), radius: 4, y: 2)
         }
+        .accessibilityIdentifier("settings-button")
     }
 
     // MARK: Trip Log capture (wayfinder #51)
@@ -233,6 +235,7 @@ struct RootView: View {
                 .background(.regularMaterial, in: Circle())
                 .shadow(color: .black.opacity(0.2), radius: 4, y: 2)
         }
+        .accessibilityIdentifier("trip-record-button")
     }
 
     private var tripElapsedCapsule: some View {

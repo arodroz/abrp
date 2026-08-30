@@ -538,6 +538,13 @@ final class PlanStore: NSObject, @preconcurrency MLNMapViewDelegate, @preconcurr
         replan()
     }
 
+    /// Offset-based removal for the route editor's native edit-mode delete controls
+    /// (`.onDelete`); editor-smoke keeps driving the id-based mutation above directly.
+    func removeWaypoints(atOffsets offsets: IndexSet) {
+        waypoints.remove(atOffsets: offsets)
+        replan()
+    }
+
     func moveWaypoints(fromOffsets: IndexSet, toOffset: Int) {
         waypoints.move(fromOffsets: fromOffsets, toOffset: toOffset)
         replan()
