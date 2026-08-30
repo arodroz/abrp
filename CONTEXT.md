@@ -99,3 +99,11 @@ _Avoid_: Drive log, telemetry, trip history
 **Invalid Plan**:
 A Plan the planner could not make satisfy the SoC constraints; it is still returned, with the failing Leg flagged, instead of an error.
 _Avoid_: Failed route, no route
+
+**Drive Mode**:
+The state entered by Go in which the app follows the current Plan on the road: the position snapped to the route, the camera following, ETA and predicted SoC read at the live position, Charging Stops advanced as they are reached. Ends at arrival or by an explicit End.
+_Avoid_: Navigation mode, turn-by-turn, guidance mode
+
+**Go**:
+The action that enters Drive Mode with the current Plan, available only when the Plan's origin is the current location; entering it also opens the drive's Trip Log.
+_Avoid_: Start navigation, start route, depart
