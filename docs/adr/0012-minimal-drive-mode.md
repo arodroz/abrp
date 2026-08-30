@@ -1,7 +1,7 @@
 # 12. Minimal Drive Mode: route-following without turn-by-turn
 
 Date: 2026-08-30
-Status: Accepted
+Status: Accepted, amended same day (see Amendment)
 Wayfinder ticket: https://github.com/arodroz/abrp/issues/58
 
 ## Context
@@ -74,3 +74,16 @@ no telemetry anchor exists mid-drive.
 - A drive's honesty depends on the off-route replan path: with model-only SoC,
   a silent replan from position is the sole mechanism keeping the displayed
   plan truthful.
+
+## Amendment (2026-08-30)
+
+On seeing what the route-following cut means in practice, the driver overrode
+decision 1's deferral: **turn-by-turn guidance is in scope and gates the M4
+milestone** — the calibration drives happen only when the app speaks turns.
+Decisions 2–8 stand unchanged; route-following remains the foundation
+turn-by-turn stacks on (banners/voice as consumers of the progress engine, the
+layering every SDK uses). What this pulls into scope: street-name and junction
+data through the pipeline into the Region Pack (a format bump), maneuver
+generation in the planner, and banner + voice UI in the app — charted via the
+research at issue #64, which graduates into build tickets. "Better-route
+offers" and mid-drive editing remain out of scope.
