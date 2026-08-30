@@ -23,6 +23,8 @@ struct SettingsForm: View {
     @Environment(\.dismiss) private var dismiss
     @State private var pendingDeleteRegionId: String?
     @State private var pendingDeleteTripLogURL: URL?
+    @State private var confirmingDeleteAllLogs = false
+    @State private var confirmingClearRecents = false
 
     var body: some View {
         NavigationStack {
@@ -138,6 +140,29 @@ struct SettingsForm: View {
                             value: referenceConsumptionWhPerKm, in: 120...260, step: 5
                         )
                     }
+                }
+
+                // Data section (issue #56 / SEC-010): local-data deletion controls, ahead of
+                // Appearance so it reads as part of the same account/vehicle-level settings
+                // rather than tucked below the display options.
+                Section("Data") {
+                    Button("Delete All Trip Logs", role: .destructive) { confirmingDeleteAllLogs = true }
+                        .confirmationDialog(
+                            "Delete all Trip Logs?", isPresented: $confirmingDeleteAllLogs
+                        ) {
+                            Button("Delete", role: .destructive) {
+                                tripStore.deleteAllLogs()
+                                store.refreshCalibration(logURLs: tripStore.logs)
+                            }
+                            Button("Cancel", role: .cancel) {}
+                        }
+                    Button("Clear Recent Destinations", role: .destructive) { confirmingClearRecents = true }
+                        .confirmationDialog(
+                            "Clear recent destinations?", isPresented: $confirmingClearRecents
+                        ) {
+                            Button("Clear", role: .destructive) { RecentDestination.clearAll() }
+                            Button("Cancel", role: .cancel) {}
+                        }
                 }
 
                 Section("Appearance") {

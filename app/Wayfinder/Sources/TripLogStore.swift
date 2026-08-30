@@ -189,6 +189,16 @@ final class TripLogStore: NSObject, @preconcurrency CLLocationManagerDelegate {
         logs = TripLogStorage.list()
     }
 
+    /// Bulk delete for the Settings "Delete All Trip Logs" button (issue #56 / SEC-010):
+    /// best-effort per file, same as the existing per-row Delete button's `try?
+    /// TripLogStorage.delete`.
+    func deleteAllLogs() {
+        for url in TripLogStorage.list() {
+            try? TripLogStorage.delete(url: url)
+        }
+        refreshLogs()
+    }
+
     // MARK: CLLocationManagerDelegate
 
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {

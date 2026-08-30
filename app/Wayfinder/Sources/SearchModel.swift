@@ -81,4 +81,11 @@ struct RecentDestination: Codable, Identifiable, Equatable {
     let lon: Double
     var id: String { "\(name)|\(lat)|\(lon)" }
     var coordinate: CLLocationCoordinate2D { CLLocationCoordinate2D(latitude: lat, longitude: lon) }
+
+    /// Shared by the Settings "Clear Recent Destinations" button and the autotest (issue #56 /
+    /// SEC-010): removes the key outright rather than writing "[]" itself, so
+    /// @AppStorage("recentDestinations") (RouteEditorView) falls back to its own "[]" default.
+    static func clearAll() {
+        UserDefaults.standard.removeObject(forKey: "recentDestinations")
+    }
 }

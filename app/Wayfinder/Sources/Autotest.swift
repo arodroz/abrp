@@ -24,11 +24,17 @@
 // catalog validator rejections (including the audit's own path-traversal
 // proof), and the M-01 needs-repair row flag. Keeping the live part first
 // means an offline failure in the new checks is never confused with a
-// network-dependent one.
+// network-dependent one. It also proves two security quick-wins (issue #56)
+// against the live-installed pack: `verifyRegionPack` (SEC-006) passes on
+// the real .rpack and rejects a junk-bytes file, and every committed
+// artifact is excluded from device backup (SEC-010).
 // `--autotest triplog-smoke` (wayfinder #51) drives TripLogStore's capture
 // lifecycle directly -- there's no location-fix injection on the sim, so
 // synthetic CLLocations are fed straight to `ingest` -- and verifies the
 // saved tlog-1 JSON against the schema #52's Rust `calibrate()` will parse.
+// It also proves the SEC-010 (issue #56) data-deletion controls:
+// `tripStore.deleteAllLogs()` over synthetic logs, and
+// `RecentDestination.clearAll()` over a seeded UserDefaults entry.
 // `--autotest calibrate-smoke` (wayfinder #53) drives PlanStore's
 // refit-and-accept flow directly: synthesizes a qualifying ~130km trip and a
 // non-qualifying ~3km trip straight via TripLogStorage.save (capture itself
@@ -671,9 +677,11 @@ enum Autotest {
     /// Exercises the installer's real code path against the live hosted catalog (wayfinder
     /// #47): fetches the index, installs lu-dev (a real ~49MB download, small enough to run in
     /// an autotest), checks the installed files and record, opens a PlannerClient on the
-    /// installed rpack and parses its Charger Pack (lu-dev's known 17 chargers), then deletes
-    /// the region and checks the artifact files + record are gone while the shared style files
-    /// remain.
+    /// installed rpack and parses its Charger Pack (lu-dev's known 17 chargers), proves
+    /// `verifyRegionPack` (issue #56 / SEC-006) passes on the installed .rpack and rejects a
+    /// junk-bytes file, and that every committed artifact is excluded from backup (SEC-010),
+    /// then deletes the region and checks the artifact files + record are gone while the
+    /// shared style files remain.
     @MainActor
     private static func runInstallSmoke(installer: PackInstaller) async {
         var ok = true
@@ -727,6 +735,45 @@ enum Autotest {
             report("lu-dev-charger-count", false, "\(error)")
             ok = false
         }
+
+        // -- SEC-006: verifyRegionPack succeeds on a real, live-catalog-installed .rpack --
+        // the pass case the Rust tests couldn't cover (they only have synthetic/corrupt
+        // packs). Off the main actor, same as PackInstaller's own call.
+        let luDevRpackURL = docs.appendingPathComponent("lu-dev.rpack")
+        do {
+            try await Task.detached(priority: .userInitiated) {
+                try verifyRegionPack(path: luDevRpackURL.path)
+            }.value
+            report("deep-verify-valid-pack", true)
+        } catch {
+            report("deep-verify-valid-pack", false, "\(error)")
+            ok = false
+        }
+
+        // -- SEC-006: verifyRegionPack rejects a file that's just junk bytes, not a real
+        // .rpack at all.
+        let garbageURL = FileManager.default.temporaryDirectory.appendingPathComponent("autotest-garbage-\(UUID().uuidString).rpack")
+        try? Data((0..<256).map { _ in UInt8.random(in: 0...255) }).write(to: garbageURL)
+        var garbageRejected = false
+        do {
+            try await Task.detached(priority: .userInitiated) {
+                try verifyRegionPack(path: garbageURL.path)
+            }.value
+        } catch {
+            garbageRejected = true
+        }
+        report("deep-verify-rejects-garbage", garbageRejected)
+        ok = ok && garbageRejected
+        try? FileManager.default.removeItem(at: garbageURL)
+
+        // -- SEC-010: every committed lu-dev artifact (plus the shared style files) is
+        // excluded from device backup.
+        let backupExcludedOk = expectedFiles.allSatisfy { name in
+            let values = try? docs.appendingPathComponent(name).resourceValues(forKeys: [.isExcludedFromBackupKey])
+            return values?.isExcludedFromBackup == true
+        }
+        report("backup-excluded", backupExcludedOk)
+        ok = ok && backupExcludedOk
 
         do {
             try installer.delete(region: "lu-dev")
@@ -996,7 +1043,9 @@ enum Autotest {
     /// (cancelling resumes recording rather than truncating the trace), and that the saved
     /// tlog-1 JSON matches the schema on the fields #52's Rust `calibrate()` will parse --
     /// including a byte-level spot-check that the on-disk keys are really snake_case,
-    /// independent of the Swift model.
+    /// independent of the Swift model -- and, at the end, the SEC-010 (issue #56) data-deletion
+    /// controls: `tripStore.deleteAllLogs()` over synthetic logs and
+    /// `RecentDestination.clearAll()` over a seeded UserDefaults entry.
     @MainActor
     private static func runTriplogSmoke(tripStore: TripLogStore) async {
         var ok = true
@@ -1142,6 +1191,48 @@ enum Autotest {
         let deletedOk = tripStore.logs.isEmpty && !FileManager.default.fileExists(atPath: url.path)
         report("logs-empty-after-delete", deletedOk, "count=\(tripStore.logs.count)")
         ok = ok && deletedOk
+
+        // -- SEC-010: delete-all-logs -- two minimal synthetic logs saved directly via
+        // TripLogStorage.save (capture itself is exercised above), then
+        // tripStore.deleteAllLogs() removes both the files and the in-memory list.
+        let syntheticNow = Int(Date().timeIntervalSince1970)
+        let syntheticLogA = TripLog(
+            format: "tlog-1", id: UUID().uuidString, vehicle: "ioniq5_lr_2wd",
+            startUnix: syntheticNow - 200, endUnix: syntheticNow - 100,
+            startSocPct: 80, endSocPct: 75, ambientTempC: nil, samples: []
+        )
+        let syntheticLogB = TripLog(
+            format: "tlog-1", id: UUID().uuidString, vehicle: "ioniq5_lr_2wd",
+            startUnix: syntheticNow - 100, endUnix: syntheticNow,
+            startSocPct: 75, endSocPct: 70, ambientTempC: nil, samples: []
+        )
+        do {
+            try TripLogStorage.save(syntheticLogA)
+            try TripLogStorage.save(syntheticLogB)
+        } catch {
+            report("delete-all-logs", false, "failed to save synthetic logs: \(error)")
+            ok = false
+        }
+        tripStore.refreshLogs()
+        let seededOk = tripStore.logs.count == 2
+        report("delete-all-logs-seeded", seededOk, "count=\(tripStore.logs.count)")
+        ok = ok && seededOk
+
+        tripStore.deleteAllLogs()
+        let allLogsDeletedOk = tripStore.logs.isEmpty && TripLogStorage.list().isEmpty
+        report("delete-all-logs", allLogsDeletedOk, "count=\(tripStore.logs.count)")
+        ok = ok && allLogsDeletedOk
+
+        // -- SEC-010: clear-recents -- seeds UserDefaults with one valid RecentDestination,
+        // then RecentDestination.clearAll() removes the key outright.
+        let recentDestination = RecentDestination(name: "Antwerp", lat: 51.2194, lon: 4.4025)
+        if let encoded = try? JSONEncoder().encode([recentDestination]), let json = String(data: encoded, encoding: .utf8) {
+            UserDefaults.standard.set(json, forKey: "recentDestinations")
+        }
+        RecentDestination.clearAll()
+        let recentsClearedOk = UserDefaults.standard.object(forKey: "recentDestinations") == nil
+        report("clear-recents", recentsClearedOk)
+        ok = ok && recentsClearedOk
 
         await finish(ok: ok)
     }

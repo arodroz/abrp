@@ -22,10 +22,16 @@ enum OpenMeteo {
     /// all-null hourly data -- returns nil; a Trip Log with a null ambient temp is still valid
     /// (ADR 0009 point 1 makes weather automatic-but-best-effort, not load-bearing for the fit).
     static func temperatureC(lat: Double, lon: Double, unix: Int) async -> Double? {
+        // Coarsened to 2 decimal places, ~1.1 km (issue #56 / SEC-009): coarser than
+        // Open-Meteo's own forecast-model grid, so no accuracy is lost, and the exact trip
+        // midpoint never leaves the device.
+        let roundedLat = (lat * 100).rounded() / 100
+        let roundedLon = (lon * 100).rounded() / 100
+
         var components = URLComponents(string: "https://api.open-meteo.com/v1/forecast")!
         components.queryItems = [
-            URLQueryItem(name: "latitude", value: String(lat)),
-            URLQueryItem(name: "longitude", value: String(lon)),
+            URLQueryItem(name: "latitude", value: String(roundedLat)),
+            URLQueryItem(name: "longitude", value: String(roundedLon)),
             URLQueryItem(name: "hourly", value: "temperature_2m"),
             URLQueryItem(name: "past_days", value: "1"),
             URLQueryItem(name: "forecast_days", value: "1"),

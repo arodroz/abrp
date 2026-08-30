@@ -171,3 +171,47 @@ impl Planner {
         calibrate_of(&logs, vehicle, reference_consumption_wh_per_km)
     }
 }
+
+/// Install-time deep verification of a Region Pack (issue #56 / SEC-006):
+/// checksum verification plus the `O(nodes + edges)` semantic validation in
+/// `Rpack::verify_structure`, run once when a pack is installed. Kept out of
+/// `Planner::new` above so every later open stays cheap -- `Rpack::open`
+/// alone is only `O(section count)`.
+#[uniffi::export]
+pub fn verify_region_pack(path: String) -> Result<(), PlannerError> {
+    let pack = Rpack::open(&path).map_err(|e| PlannerError::PackMissing {
+        message: format!("failed to open region pack at {path}: {e}"),
+    })?;
+    pack.verify_checksums()
+        .map_err(|e| PlannerError::PackMissing {
+            message: format!("region pack at {path} failed checksum verification: {e}"),
+        })?;
+    pack.verify_structure()
+        .map_err(|e| PlannerError::PackMissing {
+            message: format!("region pack at {path} failed structural verification: {e}"),
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+
+    use super::*;
+
+    #[test]
+    fn verify_region_pack_rejects_a_nonexistent_path() {
+        let err = verify_region_pack("/no/such/file.rpack".to_string()).unwrap_err();
+        assert!(matches!(err, PlannerError::PackMissing { .. }));
+    }
+
+    #[test]
+    fn verify_region_pack_rejects_a_garbage_file() {
+        let mut file = tempfile::NamedTempFile::new().expect("create temp file");
+        file.write_all(b"not an rpack, just junk bytes")
+            .expect("write junk bytes");
+        let path = file.path().to_str().expect("utf8 path").to_string();
+
+        let err = verify_region_pack(path).unwrap_err();
+        assert!(matches!(err, PlannerError::PackMissing { .. }));
+    }
+}

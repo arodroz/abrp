@@ -11,7 +11,7 @@ mod triplog;
 mod types;
 
 pub use error::PlannerError;
-pub use planner::Planner;
+pub use planner::{verify_region_pack, Planner};
 pub use types::{
     FfiCalibrationResult, FfiGeoPoint, FfiLeg, FfiLegInput, FfiPlan, FfiPlanAlt, FfiPlanRequest,
     FfiSocPoint, FfiStop, FfiTripFit, FfiVehicle, FfiWaypoint,

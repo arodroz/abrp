@@ -2228,6 +2228,20 @@ fileprivate struct FfiConverterSequenceTypeFfiWaypoint: FfiConverterRustBuffer {
         return seq
     }
 }
+/**
+ * Install-time deep verification of a Region Pack (issue #56 / SEC-006):
+ * checksum verification plus the `O(nodes + edges)` semantic validation in
+ * `Rpack::verify_structure`, run once when a pack is installed. Kept out of
+ * `Planner::new` above so every later open stays cheap -- `Rpack::open`
+ * alone is only `O(section count)`.
+ */
+public func verifyRegionPack(path: String)throws   {try rustCallWithError(FfiConverterTypePlannerError_lift) {
+        uniffiCallStatus in
+    uniffi_planner_ffi_fn_func_verify_region_pack(
+        FfiConverterString.lower(path),uniffiCallStatus
+    )
+}
+}
 
 private enum InitializationResult {
     case ok
@@ -2243,6 +2257,9 @@ private let initializationResult: InitializationResult = {
     let scaffolding_contract_version = ffi_planner_ffi_uniffi_contract_version()
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
+    }
+    if (uniffi_planner_ffi_checksum_func_verify_region_pack() != 59219) {
+        return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_planner_ffi_checksum_method_planner_calibrate() != 19204) {
         return InitializationResult.apiChecksumMismatch

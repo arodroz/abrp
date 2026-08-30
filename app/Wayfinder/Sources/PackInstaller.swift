@@ -24,6 +24,7 @@
 // staged-and-verified skip below makes that re-entry idempotent instead of redundant.
 import CryptoKit
 import Foundation
+import PlannerKit
 import UIKit
 
 /// `{region_id, epoch, artifacts: {kind: {file, sha256}}}`, keyed by "region_pack" /
@@ -233,6 +234,15 @@ final class PackInstaller: NSObject {
         for scanned in Self.scanInstalledRows() {
             guard let record = Self.loadRecord(region: scanned.id) else { continue }
             let needsRepair = !Self.filesPresent(record: record, docs: docs)
+            if !needsRepair {
+                // SEC-010: retroactively excludes an already-installed region's files from
+                // backup -- covers regions installed before this flag existed. Idempotent and
+                // cheap (a resource-value set, not a content read), so redoing it on every
+                // refresh is fine.
+                for artifact in record.artifacts.values {
+                    Self.excludeFromBackup(docs.appendingPathComponent(artifact.file))
+                }
+            }
             if let idx = rows.firstIndex(where: { $0.id == scanned.id }) {
                 rows[idx].installedEpoch = record.epoch
                 rows[idx].needsRepair = needsRepair
@@ -242,11 +252,24 @@ final class PackInstaller: NSObject {
                 rows.append(row)
             }
         }
+        for name in ["style-light.json", "style-dark.json"] {
+            Self.excludeFromBackup(docs.appendingPathComponent(name))
+        }
         rows.sort { $0.id < $1.id }
     }
 
     private static func filesPresent(record: InstalledRecord, docs: URL) -> Bool {
         record.artifacts.values.allSatisfy { FileManager.default.fileExists(atPath: docs.appendingPathComponent($0.file).path) }
+    }
+
+    /// Best-effort (issue #56 / SEC-010): a missing file or a `setResourceValues` failure must
+    /// not fail the install, or the startup refresh that's re-applying this retroactively.
+    private static func excludeFromBackup(_ url: URL) {
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        var url = url
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        try? url.setResourceValues(values)
     }
 
     // MARK: Install / refresh
@@ -324,6 +347,20 @@ final class PackInstaller: NSObject {
                     throw PackInstallerError.checksumMismatch(kind: kind, expected: artifact.sha256, got: digest)
                 }
             }
+
+            if kind == "region_pack" {
+                // One-time deep verification at install (issue #56 / SEC-006): sha256 only
+                // proves the bytes weren't corrupted/truncated in transit, not that the
+                // .rpack's internal structure (checksums + node/edge tables) is sound.
+                // Deliberately kept out of Planner's regionPackPath: init/open path so every
+                // later launch stays cheap -- this runs once per epoch, here, at install time.
+                // Off the main actor, same as the sha256 above: costs seconds-to-minutes on
+                // multi-GB packs.
+                try await Task.detached(priority: .userInitiated) {
+                    try verifyRegionPack(path: stagedURL.path)
+                }.value
+            }
+
             newArtifacts[kind] = expected
             journalEntries.append(CommitJournalEntry(stagedFile: artifact.file, destinationFile: artifact.file, sha256: artifact.sha256))
         }
@@ -340,10 +377,12 @@ final class PackInstaller: NSObject {
         try Self.writeJournal(journal, docs: docs)
 
         for entry in journalEntries {
-            try Self.applyReplace(
-                from: stagingDir.appendingPathComponent(entry.stagedFile),
-                to: docs.appendingPathComponent(entry.destinationFile)
-            )
+            let destURL = docs.appendingPathComponent(entry.destinationFile)
+            try Self.applyReplace(from: stagingDir.appendingPathComponent(entry.stagedFile), to: destURL)
+            // SEC-010: packs (and the shared style files) are multi-GB and reproducible from
+            // the hosted catalog, so they don't belong in device backups -- unlike Trip Logs,
+            // which deliberately stay backed up as user data.
+            Self.excludeFromBackup(destURL)
         }
 
         try Self.saveRecord(record)

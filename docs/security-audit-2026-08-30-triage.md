@@ -28,7 +28,7 @@ agrees.
 | SEC-010 no backup/protection/retention policy | Medium | **Confirmed** | Trip logs + multi-GB packs live in Documents with default backup semantics; five exact recent destinations persist in UserDefaults with no clear-all. Also a practical issue: eu-west (~10 GB) inflating device backups. |
 | SEC-011 no app-owned privacy manifest | Medium | **Confirmed; App-Store-only relevance** | No `PrivacyInfo.xcprivacy` in the app target (only MapLibre's). App Store distribution is explicitly out of scope of the current effort. |
 | SEC-012 Actions lack least-privilege/supply-chain controls | Medium | **Partially stale** | CI now declares a `permissions:` block and runs `rustsec/audit-check`. Residual: actions pinned by tag, not commit SHA; no CodeQL/dependency-review. |
-| SEC-013 two RustSec warnings | Low | **Confirmed** | `bincode 1.3.3` (pipeline-only) and transitive `memmap2 0.5.10` via `osmpbf 0.3.8` (runtime reader is on 0.9.11) — both verified in Cargo.lock. `cargo audit` now runs in CI (warnings don't fail it). |
+| SEC-013 two RustSec warnings | Low | **Confirmed; accepted risk — no upstream fix** | `bincode 1.3.3` (pipeline-only) and transitive `memmap2 0.5.10` via `osmpbf 0.3.8` — both verified in Cargo.lock. Remediation attempted 2026-08-30: `osmpbf 0.3.8` is the newest published release and itself pins `memmap2 ^0.5`, so no version bump can clear the advisory. Accepted because both crates run only in the Mac-side pipeline on trusted local inputs, never in the iOS runtime (the pack reader uses `memmap2 0.9.11`). Revisit if osmpbf releases, or replace the crate. `cargo audit` runs in CI (warnings don't fail it). |
 | SEC-014 Swift 6 not reproducibly enabled | Low | **Fixed** | `project.yml` is committed at `SWIFT_VERSION: 6.0` + `SWIFT_STRICT_CONCURRENCY: complete` (M-05 remediation) and CI builds the app from a clean checkout. Residual: CI builds Debug/simulator, not Release/device. |
 | SEC-015 "offline" styles contact GitHub Pages | Low | **Confirmed** | Both style templates fetch glyphs/sprites from `protomaps.github.io`. |
 
@@ -37,7 +37,7 @@ agrees.
 - **Quick wins, in scope now** (small, independent): SEC-006 (invoke the existing deep
   verification at install/activation), SEC-009 (coarsen coordinates + disclose), SEC-010's
   cheap half (exclude packs from backup; "clear recents"/"delete all trip logs"), SEC-012
-  residual (SHA-pin actions), SEC-013 (bump `osmpbf`).
+  residual (SHA-pin actions). SEC-013 turned out to have no upstream fix — see its row.
 - **The architectural cluster** — SEC-001 + SEC-003, with SEC-004/005 as the validation spec a
   signed manifest needs anyway — is one coherent design effort ("signed, atomically-activated
   releases"), ADR-sized, worth a wayfinder charting session of its own. It becomes load-bearing
