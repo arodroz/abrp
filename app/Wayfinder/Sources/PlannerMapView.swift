@@ -26,22 +26,20 @@ struct PlannerMapView: UIViewRepresentable {
         mapView.addGestureRecognizer(tap)
         context.coordinator.tap = tap
 
-        #if targetEnvironment(simulator)
-            // iOS 26 simulator: REAL pointer input (the hover-move stream Simulator.app
-            // synthesizes ahead of every mouse click) crashes UIKit's delayed-touch
-            // bookkeeping -- NSInvalidArgumentException, `insertObject:atIndex:` nil, inside
-            // `-[UIGestureRecognizer _delayTouchesForEvent:inPhase:]` -- on the first click
-            // over the map. Every UIGestureRecognizer delays touchesEnded by default, and none
-            // of the map's (ours above or MapLibre's own) needs to, so switch the delay
-            // machinery off wholesale. Reproduced/verified with a real HID mouse glide+click;
-            // XCUITest's synthesized touches never trigger it (no hover stream), which is why
-            // the UI e2e suite alone missed it. Simulator-only: device input has no hover
-            // stream and gesture behavior there stays exactly as shipped.
-            for recognizer in mapView.gestureRecognizers ?? [] {
-                recognizer.delaysTouchesBegan = false
-                recognizer.delaysTouchesEnded = false
-            }
-        #endif
+        // iOS 26: real input over the map crashes UIKit's delayed-touch bookkeeping --
+        // NSInvalidArgumentException, `insertObject:atIndex:` nil, inside
+        // `-[UIGestureRecognizer _delayTouchesForEvent:inPhase:]` -- on the first tap/click.
+        // Every UIGestureRecognizer delays touchesEnded by default, and none of the map's
+        // (ours above or MapLibre's own) needs to, so switch the delay machinery off
+        // wholesale. First diagnosed on the simulator via a real HID mouse glide+click and
+        // shipped simulator-only on the assumption the hover-move stream was required;
+        // identical SIGABRTs from finger taps on an iPhone 15 Pro (2026-08-30) disproved
+        // that, so this now applies everywhere. XCUITest's synthesized touches never
+        // trigger the crash, which is why the UI e2e suite alone missed it.
+        for recognizer in mapView.gestureRecognizers ?? [] {
+            recognizer.delaysTouchesBegan = false
+            recognizer.delaysTouchesEnded = false
+        }
 
         return mapView
     }

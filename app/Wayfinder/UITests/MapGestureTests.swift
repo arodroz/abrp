@@ -32,6 +32,12 @@ final class MapGestureTests: WayfinderUITestCase {
     /// The three real crashes on 2026-08-30 came 70s and 11s apart -- crash, relaunch, crash
     /// again within seconds. That is a user touching the map DURING startup (style/planner
     /// still loading), not after politely waiting for it to settle like the flow tests do.
+    /// Coordinate-based events only: element-level multi-touch gestures (twoFingerTap/
+    /// pinch/rotate) run an occlusion check that fails against the full-window startup
+    /// overlay ("Unable to compute coordinates for gesture after 5 attempts"), aborting
+    /// the test before the app is ever touched. Coordinate events skip that check -- and
+    /// match the real crashes, which were plain taps during startup. Post-settle
+    /// multi-touch coverage lives in testMapMashingLikeARegularUser.
     func testImmediateMashingAtLaunch() throws {
         launchBare()
         let window = app.windows.firstMatch
@@ -39,20 +45,18 @@ final class MapGestureTests: WayfinderUITestCase {
 
         // No settling wait: straight onto the glass from the first frame.
         for round in 1...4 {
-            window.doubleTap()
-            window.twoFingerTap()
-            window.pinch(withScale: 2.5, velocity: 10)
-            window.swipeDown()
-            window.pinch(withScale: 0.3, velocity: -10)
-            window.swipeRight()
-            window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).press(forDuration: 0.6)
             for i in 0..<8 {
                 window.coordinate(
                     withNormalizedOffset: CGVector(dx: 0.25 + 0.08 * Double(i % 5), dy: 0.3 + 0.07 * Double(i % 4))
                 ).tap()
             }
-            window.rotate(.pi / 3, withVelocity: 3)
-            assertStillRunning("immediate mashing (round \(round))")
+            window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.45)).doubleTap()
+            window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).press(forDuration: 0.6)
+            window.coordinate(withNormalizedOffset: CGVector(dx: 0.3, dy: 0.6))
+                .press(forDuration: 0.05, thenDragTo: window.coordinate(withNormalizedOffset: CGVector(dx: 0.7, dy: 0.4)))
+            window.coordinate(withNormalizedOffset: CGVector(dx: 0.7, dy: 0.3))
+                .press(forDuration: 0.05, thenDragTo: window.coordinate(withNormalizedOffset: CGVector(dx: 0.3, dy: 0.7)))
+            assertStillRunning("immediate coordinate mashing (round \(round))")
         }
     }
 
