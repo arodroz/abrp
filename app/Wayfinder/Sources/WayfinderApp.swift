@@ -7,7 +7,9 @@
 // docs/codebase-audit-2026-08-29.md): PackInstaller's background downloads need it stashed
 // somewhere `urlSessionDidFinishEvents(forBackgroundURLSession:)` can reach. DriveStore
 // (Drive Mode core, wayfinder #59) is owned here too, wrapping `store` (PlanStore) rather than
-// duplicating its map/route state.
+// duplicating its map/route state. This is also where CarPlaySceneDelegate (wayfinder #70) gets
+// handed `store`/`driveStore` -- UIKit instantiates that scene delegate by class name, so it has
+// no other way to reach the stores this app already owns.
 import Foundation
 import SwiftUI
 import UIKit
@@ -47,6 +49,10 @@ struct WayfinderApp: App {
     init() {
         _ = Self.launchUptime
         driveStore = DriveStore(planStore: store, tripStore: tripStore)
+        // wayfinder #70: the CarPlay scene is UIKit-instantiated by class name, so it can't be
+        // handed the stores any other way.
+        CarPlaySceneDelegate.planStore = store
+        CarPlaySceneDelegate.driveStore = driveStore
         Autotest.runIfRequested(store: store, installer: packInstaller, tripStore: tripStore, driveStore: driveStore)
         let installer = packInstaller
         // wayfinder #55: an install of the active region must release the live Planner's

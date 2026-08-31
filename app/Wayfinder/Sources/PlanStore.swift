@@ -91,6 +91,15 @@ final class PlanStore: NSObject, @preconcurrency MLNMapViewDelegate, @preconcurr
     private(set) var planErrorVersion = 0
     /// Bumped on every landed plan; RootView uses it to fit the camera.
     private(set) var planVersion = 0
+    /// Observable mirror of `mapView.styleURL` (wayfinder #70): `mapView` is a stored object, so
+    /// mutating its styleURL is invisible to @Observable tracking -- CarPlay's own map view syncs
+    /// its style off THIS property, which invalidates its SwiftUI wrapper like any other read.
+    private(set) var mapStyleURL: URL?
+    /// Bumped on every applyStyle (wayfinder #70). MapStyle.patchedStyleURL rewrites ONE temp
+    /// file, so `mapStyleURL` compares equal across re-patches (light/dark swap, region switch)
+    /// -- a URL != guard alone would never reload CarPlay's map. Its coordinator reloads on this
+    /// bump instead, mirroring how the phone map reloads via unconditional reassignment.
+    private(set) var styleVersion = 0
 
     // Plan request fields, bound to the settings sheet (wayfinder #44). Each planner-affecting
     // field replans on change via didSet, guarded against no-op sets so a continuous slider
@@ -364,6 +373,8 @@ final class PlanStore: NSObject, @preconcurrency MLNMapViewDelegate, @preconcurr
         // the swapped style, not the previous one, has finished loading.
         isStyleLoaded = false
         mapView.styleURL = styleURL
+        mapStyleURL = styleURL
+        styleVersion += 1
     }
 
     // MARK: Planning
@@ -550,7 +561,9 @@ final class PlanStore: NSObject, @preconcurrency MLNMapViewDelegate, @preconcurr
         return Self.drivePuckImage
     }
 
-    private static let drivePuckImage: MLNAnnotationImage = {
+    /// Internal (not private, wayfinder #70): CarPlay's map coordinator reuses this exact image
+    /// for its own "drive-puck" annotation rather than duplicating the drawing code.
+    static let drivePuckImage: MLNAnnotationImage = {
         let size = CGSize(width: 30, height: 30)
         let renderer = UIGraphicsImageRenderer(size: size)
         let image = renderer.image { context in

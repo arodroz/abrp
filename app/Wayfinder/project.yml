@@ -30,6 +30,15 @@ targets:
           - location
           - audio
         CADisableMinimumFrameDurationOnPhone: true
+        # CarPlay display-only surface (wayfinder #70): a CPTemplateApplicationSceneSessionRole
+        # scene needs UIApplicationSceneManifest to be picked up as an extra scene, alongside
+        # the default WindowGroup scene above.
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: true
+          UISceneConfigurations:
+            CPTemplateApplicationSceneSessionRoleApplication:
+              - UISceneConfigurationName: CarPlay
+                UISceneDelegateClassName: $(PRODUCT_MODULE_NAME).CarPlaySceneDelegate
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: org.anteras.wayfinder
@@ -41,6 +50,14 @@ targets:
         SWIFT_STRICT_CONCURRENCY: complete
         MARKETING_VERSION: "1.0"
         CURRENT_PROJECT_VERSION: "1"
+        # CarPlay entitlement (wayfinder #70/#71), simulator-gated ON PURPOSE: Apple hasn't
+        # granted the com.apple.developer.carplay-maps managed capability to this team yet, so
+        # shipping it unconditionally would break Automatic code signing for real devices --
+        # signing would fail trying to provision an entitlement the team isn't authorized for.
+        # Restricting CODE_SIGN_ENTITLEMENTS to the simulator SDK lets CarPlay be exercised on
+        # the Simulator now; #71 tracks dropping this [sdk=iphonesimulator*] qualifier once the
+        # capability is granted.
+        "CODE_SIGN_ENTITLEMENTS[sdk=iphonesimulator*]": Wayfinder.entitlements
     dependencies:
       - package: PlannerKit
         product: PlannerKit
@@ -59,6 +76,7 @@ targets:
         DEVELOPMENT_TEAM: 2V28CD5VJY
         CODE_SIGN_STYLE: Automatic
         SWIFT_VERSION: "6.0"
+        GENERATE_INFOPLIST_FILE: YES
     dependencies:
       - target: Wayfinder
 
