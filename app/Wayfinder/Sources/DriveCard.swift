@@ -1,16 +1,18 @@
 // Compact drive HUD card (wayfinder #60, ADR 0012 points 3-4): replaces the result card while
 // driving. Collapsed shows the ETA clock plus a one-line remaining-distance/remaining-time/
-// next-Charging-Stop-arrival-SoC summary; expanded reveals the existing SoC chart (wayfinder
-// #43) with its marker pinned to the live snapped position instead of the scrub selection
-// (SoCChartView.pinnedDistanceM). Visual idiom matches ResultCard (regularMaterial, rounded 20,
-// shadow, drag-handle capsule) -- a separate view rather than reusing ResultCard directly,
-// since the drive HUD's fields (ETA/remaining/next-stop) don't map onto ResultCard's
-// plan-summary layout, which is hidden entirely while driving.
+// next-Charging-Stop-arrival-SoC summary and the live SoC, tappable for wayfinder #63's dash
+// correction; expanded reveals the existing SoC chart (wayfinder #43) with its marker pinned to
+// the live snapped position instead of the scrub selection (SoCChartView.pinnedDistanceM).
+// Visual idiom matches ResultCard (regularMaterial, rounded 20, shadow, drag-handle capsule) --
+// a separate view rather than reusing ResultCard directly, since the drive HUD's fields
+// (ETA/remaining/next-stop) don't map onto ResultCard's plan-summary layout, which is hidden
+// entirely while driving.
 import SwiftUI
 
 struct DriveCard: View {
     let store: PlanStore
     let driveStore: DriveStore
+    let onSocTap: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -56,6 +58,18 @@ struct DriveCard: View {
                 .truncationMode(.tail)
             }
             Spacer()
+            // Current model SoC at the live position (ADR 0012 point 5) -- tappable (wayfinder #63):
+            // opens RootView's "Correct SoC" alert so the driver can anchor the model to the dash.
+            Button(action: onSocTap) {
+                HStack(spacing: 3) {
+                    Image(systemName: "bolt.batteryblock")
+                    Text(formatSocPct(hud.socAtPosition))
+                }
+                .font(.subheadline.bold())
+                .foregroundColor(.secondary)
+                .padding(8)
+            }
+            .accessibilityIdentifier("drive-soc-button")
             Button {
                 withAnimation(.spring()) { driveStore.driveCardExpanded.toggle() }
             } label: {

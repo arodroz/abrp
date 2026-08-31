@@ -67,7 +67,10 @@
 // STANDALONE capture already running (record button) is adopted outright by
 // Go with no prompt -- the drive-closed log this produces is byte-for-byte
 // the same shape triplog-smoke's button-started one is, since it's the same
-// producer.
+// producer. Its last step (wayfinder #63) proves manual mid-drive dash-SoC
+// correction: `correctSoc` replans from the snapped position at the entered
+// SoC (not the model's curve estimate), the HUD/curve re-anchor to it, and
+// it's a no-op once the drive is over.
 import CoreLocation
 import CryptoKit
 import Darwin
@@ -1952,6 +1955,84 @@ enum Autotest {
             report("drive-log-saved", false, "lastSavedURL never changed")
             ok = false
         }
+
+        // Step 14 (wayfinder #63): manual mid-drive dash-SoC correction. Re-enter drive (origin is
+        // still current-location -- the drive replans above re-adopt it), land one on-route fix so
+        // `snappedCoordinate` is set, then correct to 55%: exactly one replan from the snapped
+        // position with the ENTERED SoC (not the curve's) as the departure anchor, and the HUD/curve
+        // re-anchored to it.
+        driveStore.go()
+        tripStore.confirmStartSoc(80)
+        driveStore.resolvePendingGo()
+        guard let plan63 = store.displayedPlan else {
+            report("soc-correct-replan", false, "no displayed plan after re-entering drive for step 14")
+            await finish(ok: false)
+        }
+        let polyline63 = plan63.polyline.map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
+        let cumulative63 = RouteSnap.cumulativeDistances(polyline63)
+        guard let vertexIdx63 = cumulative63.firstIndex(where: { $0 >= 2000 }) else {
+            report("soc-correct-replan", false, "polyline too short for step 14's fix")
+            await finish(ok: false)
+        }
+        driveStore.ingest(CLLocation(
+            coordinate: polyline63[vertexIdx63], altitude: 300, horizontalAccuracy: 5, verticalAccuracy: 5,
+            course: -1, speed: 15, timestamp: Date()
+        ))
+        guard let snapped63 = driveStore.snappedCoordinate, driveStore.isOnRoute else {
+            report("soc-correct-replan", false, "no on-route snapped position before correcting")
+            await finish(ok: false)
+        }
+        let routeVersionBefore63 = driveStore.routeUpdatedVersion
+        let planVersionBefore63 = store.planVersion
+        driveStore.correctSoc(55)
+        let correctionLanded = await waitWithTimeout(seconds: 30) { driveStore.routeUpdatedVersion == routeVersionBefore63 + 1 }
+        let correctReplanOk = correctionLanded && store.planVersion > planVersionBefore63 && driveStore.phase == .driving
+        report(
+            "soc-correct-replan", correctReplanOk,
+            "routeUpdatedVersion=\(driveStore.routeUpdatedVersion) planVersion=\(store.planVersion) phase=\(driveStore.phase)"
+        )
+        ok = ok && correctReplanOk
+
+        // "soc-correct-anchor": the new plan departs from the snapped position at EXACTLY the
+        // entered dash SoC -- the whole point of the ticket; the model's curve estimate loses.
+        guard let newPlan63 = store.displayedPlan else {
+            report("soc-correct-anchor", false, "no displayed plan after the correction replan")
+            await finish(ok: false)
+        }
+        let newOriginDistM63 = newPlan63.polyline.first.map {
+            CLLocation(latitude: $0.lat, longitude: $0.lon)
+                .distance(from: CLLocation(latitude: snapped63.latitude, longitude: snapped63.longitude))
+        } ?? .infinity
+        let anchorOk = newOriginDistM63 <= 300
+            && (newPlan63.socCurve.first.map { isClose($0.soc, 0.55, tol: 0.001) } ?? false)
+        report(
+            "soc-correct-anchor", anchorOk,
+            "newOriginDistM=\(newOriginDistM63) newSoc=\(String(describing: newPlan63.socCurve.first?.soc))"
+        )
+        ok = ok && anchorOk
+
+        // "soc-correct-hud": the displayed values re-anchor -- distanceAlong reset to 0 by the
+        // snapshot swap, HUD SoC now reading the corrected curve.
+        let hudAnchorOk = driveStore.distanceAlongRouteM == 0
+            && (driveStore.hud.map { isClose($0.socAtPosition, 0.55, tol: 0.001) } ?? false)
+        report(
+            "soc-correct-hud", hudAnchorOk,
+            "distanceAlongRouteM=\(driveStore.distanceAlongRouteM) socAtPosition=\(String(describing: driveStore.hud?.socAtPosition))"
+        )
+        ok = ok && hudAnchorOk
+
+        // "soc-correct-gated": once the drive is over, correctSoc must be a no-op.
+        driveStore.end()
+        tripStore.confirmEndSoc(60)
+        let routeVersionAfterEnd63 = driveStore.routeUpdatedVersion
+        driveStore.correctSoc(40)
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        let gatedOk = driveStore.routeUpdatedVersion == routeVersionAfterEnd63 && driveStore.phase == .idle
+        report(
+            "soc-correct-gated", gatedOk,
+            "routeUpdatedVersion=\(driveStore.routeUpdatedVersion) phase=\(driveStore.phase)"
+        )
+        ok = ok && gatedOk
 
         // Step: re-entry guard -- a long-press origin override closes the gate again. Note the
         // off-route replan above reset `originOverridden` to false (it adopts the deviated fix

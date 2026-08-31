@@ -14,7 +14,10 @@
 // Trip Log coupling (wayfinder #62, ADR 0012 point 7): Go now opens the "Trip start SoC" alert
 // before entering, handled with TripLogFlowTests' exact alert idiom; End opens "Trip end SoC",
 // which this test Cancels deliberately (see that step's own comment) so no tlog file lands in
-// the shared simulator container for other suites to trip over.
+// the shared simulator container for other suites to trip over. Manual mid-drive SoC correction
+// (wayfinder #63) is covered too, but only as far as tapping the card's SoC number opens and
+// Cancels the "Correct SoC" alert -- the replan itself needs a snapped position drive-smoke
+// provides.
 import XCTest
 
 final class DriveFlowTests: WayfinderUITestCase {
@@ -56,6 +59,15 @@ final class DriveFlowTests: WayfinderUITestCase {
             if chartGone { break }
         }
         XCTAssertTrue(chartGone, "soc-chart still present after collapsing the drive card, even after 3 retries")
+
+        // Manual SoC correction (wayfinder #63): the card's SoC number opens the dash-SoC alert.
+        // Cancel deliberately -- XCUITest can't inject fixes, so there's no snapped position for a
+        // real correction to replan from; the replan path itself is drive-smoke's job.
+        el("drive-soc-button").tap()
+        let socAlert = app.alerts["Correct SoC"]
+        XCTAssertTrue(waitForExistence(socAlert, timeout: 10), "\"Correct SoC\" alert never appeared after tapping the SoC number")
+        socAlert.buttons["Cancel"].tap()
+        XCTAssertTrue(waitForNonexistence(socAlert, timeout: 5), "\"Correct SoC\" alert is still up after Cancel")
 
         // Free-look: any map gesture (a coordinate drag, like MapGestureTests) should reveal
         // the Re-center button.

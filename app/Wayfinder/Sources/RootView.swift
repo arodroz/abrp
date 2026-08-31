@@ -7,7 +7,7 @@
 // the still-visible map. Appearance combines the system color scheme (reported here, on every
 // change) with PlanStore's persisted override via `updateAppearance(systemDark:)`. Trip Log
 // capture (wayfinder #51) adds a record button above the gear button, driven by TripLogStore's
-// own phase machine, with the two dash-SoC prompts as plain `.alert` TextFields. Drive Mode
+// own phase machine, with the three dash-SoC prompts as plain `.alert` TextFields. Drive Mode
 // core (wayfinder #59, ADR 0012 point 8) hides the planning UI entirely while driving or
 // arrived (`driveStore.phase != .idle`) -- the route editor, the settings/trip-record/locate-me
 // buttons, the charger callout, and the result card -- replacing them with a bottom
@@ -26,6 +26,7 @@ struct RootView: View {
     @State private var toast: String?
     @State private var chargerCallout: ChargerCalloutInfo?
     @State private var socInputText = ""
+    @State private var socCorrectionPresented = false
 
     var body: some View {
         // Split into two statements -- the compiler couldn't type-check the
@@ -110,6 +111,19 @@ struct RootView: View {
                 }
             } message: {
                 Text("Enter the dash state of charge, as a whole percent.")
+            }
+            // Manual mid-drive dash-SoC correction (wayfinder #63): same TextField idiom as the
+            // trip prompts above; OK replans from the snapped position with the entered SoC.
+            .alert("Correct SoC", isPresented: $socCorrectionPresented) {
+                TextField("SoC %", text: $socInputText).keyboardType(.numberPad)
+                Button("Replan") {
+                    if let pct = Int(socInputText) { driveStore.correctSoc(pct) }
+                    socInputText = ""
+                }
+                .disabled(Int(socInputText) == nil)
+                Button("Cancel", role: .cancel) { socInputText = "" }
+            } message: {
+                Text("Enter the dash state of charge; the route replans from your position.")
             }
     }
 
@@ -261,7 +275,7 @@ struct RootView: View {
             // The drive HUD card (wayfinder #60): nil `hud` only during the brief window
             // between `go()` and its own initial (unthrottled) computation.
             if driveStore.hud != nil {
-                DriveCard(store: store, driveStore: driveStore)
+                DriveCard(store: store, driveStore: driveStore, onSocTap: { socCorrectionPresented = true })
             }
         }
     }

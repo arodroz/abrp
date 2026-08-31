@@ -15,7 +15,9 @@
 // sustained (>=5 s) 50+ m deviation from the displayed route triggers `PlanStore.replanForDrive`
 // from the deviated position, and a landed result is swapped in via the same HUD/geometry
 // snapshot `go()` uses -- automatic, silent, no camera yank (RootView gates its fit-to-route on
-// `phase == .idle`), just a brief "Route updated" toast off `routeUpdatedVersion`.
+// `phase == .idle`), just a brief "Route updated" toast off `routeUpdatedVersion`. Manual mid-drive
+// SoC correction (wayfinder #63) reuses this same replan path, anchored on the driver's entered
+// dash % instead of the model's own curve estimate.
 //
 // Trip Log coupling (wayfinder #62, ADR 0012 point 7): Go takes the dash SoC and starts capture,
 // reusing TripLogStore's own start/stop phases rather than a second capture path -- `go()` opens
@@ -330,20 +332,36 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
         }
     }
 
-    // MARK: Off-route replan (wayfinder #61, ADR 0012 point 6)
+    // MARK: Drive replans (wayfinder #61 off-route, #63 manual SoC correction)
 
     /// Fires once a deviation has been sustained past `offRouteSustainedS`. Computes the
     /// departure SoC from the Plan's own predicted curve at the current position (model-driven,
-    /// not the settings slider) and the set of waypoints still ahead -- snapped against the OLD
-    /// `routePolyline` (the new one doesn't exist yet); a waypoint that fails to snap is kept
-    /// rather than silently dropped. Adopts the landed plan on completion only if this drive
-    /// session is still current and still driving -- see `driveSession`'s comment.
+    /// not the settings slider); the deviated fix is the replan origin.
     private func triggerOffRouteReplan(from location: CLLocation) {
         guard let drivePlan else { return }
+        let departSoc = Self.interpolatedSoc(drivePlan.socCurve, at: distanceAlongRouteM)
+        triggerDriveReplan(from: location.coordinate, departSoc: departSoc)
+    }
+
+    /// Manual mid-drive dash-SoC correction (wayfinder #63, ADR 0012 point 5's named follow-up):
+    /// the driver's entered dash % replaces the model's estimate as the departure anchor -- the
+    /// app's only truth anchor without car telemetry. Replans from `snappedCoordinate` (the puck:
+    /// snapped while on-route, the raw fix beyond the snap tolerance); a no-op before the first
+    /// fix lands or while another drive replan is in flight.
+    func correctSoc(_ pct: Int) {
+        guard phase == .driving, !replanInFlight, let coordinate = snappedCoordinate else { return }
+        triggerDriveReplan(from: coordinate, departSoc: Double(min(max(pct, 0), 100)) / 100.0)
+    }
+
+    /// Shared replan-from-position body (off-route + manual correction): waypoints still ahead
+    /// are kept -- snapped against the OLD `routePolyline` (the new one doesn't exist yet); a
+    /// waypoint that fails to snap is kept rather than silently dropped. Adopts the landed plan
+    /// on completion only if this drive session is still current and still driving -- see
+    /// `driveSession`'s comment.
+    private func triggerDriveReplan(from coordinate: CLLocationCoordinate2D, departSoc: Double) {
         replanInFlight = true
         offRouteSinceFixTimestamp = nil
 
-        let departSoc = Self.interpolatedSoc(drivePlan.socCurve, at: distanceAlongRouteM)
         let currentDistanceAlongRouteM = distanceAlongRouteM
         let keepingWaypointIds = Set(planStore.waypoints.filter { waypoint in
             guard let snap = RouteSnap.snap(
@@ -355,7 +373,7 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
 
         Task {
             let result = await planStore.replanForDrive(
-                from: location.coordinate, keepingWaypointIds: keepingWaypointIds, departSoc: departSoc
+                from: coordinate, keepingWaypointIds: keepingWaypointIds, departSoc: departSoc
             )
             if let result, phase == .driving, session == driveSession {
                 snapshotPlan(result)
