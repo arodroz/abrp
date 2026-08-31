@@ -337,9 +337,7 @@ impl RegionGraphModel {
                 )));
             }
             if self.string_offsets[0] != 0 {
-                return Err(RpackError::Validation(
-                    "string_offsets[0] must be 0".into(),
-                ));
+                return Err(RpackError::Validation("string_offsets[0] must be 0".into()));
             }
             for w in self.string_offsets.windows(2) {
                 if w[1] < w[0] {
@@ -364,7 +362,12 @@ impl RegionGraphModel {
             let Some(&attr0) = self.edge_attrs.first() else {
                 return Err(RpackError::Validation("edge_attrs is empty".into()));
             };
-            if attr0 != (EdgeAttr { name_id: 0, ref_id: 0 }) {
+            if attr0
+                != (EdgeAttr {
+                    name_id: 0,
+                    ref_id: 0,
+                })
+            {
                 return Err(RpackError::Validation(
                     "edge_attrs[0] must be {name_id: 0, ref_id: 0}".into(),
                 ));

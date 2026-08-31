@@ -103,7 +103,10 @@ fn guide_flags_for(highway: &str, tags: &HashMap<&str, &str>) -> u8 {
     if is_link {
         flags |= GUIDE_FLAG_LINK;
     }
-    if matches!(tags.get("junction").copied(), Some("roundabout" | "circular")) {
+    if matches!(
+        tags.get("junction").copied(),
+        Some("roundabout" | "circular")
+    ) {
         flags |= GUIDE_FLAG_ROUNDABOUT;
     }
     flags

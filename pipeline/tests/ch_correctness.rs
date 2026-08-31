@@ -556,7 +556,8 @@ fn ch_prepare_remaps_guidance_by_edge_identity_not_slot() {
     base.edge_attrs = edge_attrs;
     base.edge_guide = edge_guide;
     base.dest_signs = dest_signs;
-    base.validate().expect("guidance-augmented base model should validate");
+    base.validate()
+        .expect("guidance-augmented base model should validate");
 
     // Physical identity (from, to, length_bits) -> the name this base edge
     // carries, and which base slot carried the dest sign.
@@ -576,7 +577,11 @@ fn ch_prepare_remaps_guidance_by_edge_identity_not_slot() {
     for (slot, e) in contracted.edges.iter().enumerate() {
         let guide = contracted.edge_guide[slot];
         if e.ch_middle_node != CH_MIDDLE_NODE_NONE {
-            assert_eq!(guide, packs::GUIDE_NONE, "shortcut at slot {slot} should be GUIDE_NONE");
+            assert_eq!(
+                guide,
+                packs::GUIDE_NONE,
+                "shortcut at slot {slot} should be GUIDE_NONE"
+            );
             continue;
         }
         let from = owning_node(&contracted.csr_first_edge, slot);

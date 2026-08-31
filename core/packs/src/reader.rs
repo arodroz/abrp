@@ -219,8 +219,7 @@ impl Rpack {
                 .ok_or(RpackError::MissingSection {
                     section_id: SECTION_STRING_OFFSETS,
                 })?;
-            if !string_offsets_meta.len_bytes.is_multiple_of(4)
-                || string_offsets_meta.len_bytes < 8
+            if !string_offsets_meta.len_bytes.is_multiple_of(4) || string_offsets_meta.len_bytes < 8
             {
                 return Err(RpackError::SectionSizeMismatch {
                     section_id: SECTION_STRING_OFFSETS,
@@ -239,13 +238,10 @@ impl Rpack {
             // monotonicity is deep-verify's job; per-access checks in
             // `string()` make lookups safe regardless of what's in between.
             let first_offset_bytes = string_offsets_meta.offset as usize;
-            let first: u32 = bytemuck::pod_read_unaligned(
-                &mmap[first_offset_bytes..first_offset_bytes + 4],
-            );
+            let first: u32 =
+                bytemuck::pod_read_unaligned(&mmap[first_offset_bytes..first_offset_bytes + 4]);
             if first != 0 {
-                return Err(RpackError::Validation(
-                    "string_offsets[0] must be 0".into(),
-                ));
+                return Err(RpackError::Validation("string_offsets[0] must be 0".into()));
             }
             let last_offset_bytes =
                 (string_offsets_meta.offset + string_offsets_meta.len_bytes - 4) as usize;
@@ -278,12 +274,11 @@ impl Rpack {
                     });
                 }
             }
-            sections
-                .iter()
-                .find(|s| s.id == SECTION_EDGE_GUIDE)
-                .ok_or(RpackError::MissingSection {
+            sections.iter().find(|s| s.id == SECTION_EDGE_GUIDE).ok_or(
+                RpackError::MissingSection {
                     section_id: SECTION_EDGE_GUIDE,
-                })?;
+                },
+            )?;
             check_len(SECTION_EDGE_GUIDE, n_edges)?;
         }
 
@@ -539,7 +534,10 @@ impl Rpack {
             let edge_attrs = self.edge_attrs();
             let n_attrs = edge_attrs.len() as u64;
             match edge_attrs.first() {
-                Some(&EdgeAttr { name_id: 0, ref_id: 0 }) => {}
+                Some(&EdgeAttr {
+                    name_id: 0,
+                    ref_id: 0,
+                }) => {}
                 _ => {
                     return Err(RpackError::Validation(
                         "edge_attrs[0] must be {name_id: 0, ref_id: 0}".into(),

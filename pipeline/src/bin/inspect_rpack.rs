@@ -35,12 +35,14 @@ fn parse_args() -> Result<Args, String> {
             }
             "--near" => {
                 let v = args.next().ok_or("--near requires a value")?;
-                let (lat, lon) = v
-                    .split_once(',')
-                    .ok_or("--near expects LAT,LON")?;
+                let (lat, lon) = v.split_once(',').ok_or("--near expects LAT,LON")?;
                 near = Some((
-                    lat.trim().parse::<f32>().map_err(|e| format!("--near lat: {e}"))?,
-                    lon.trim().parse::<f32>().map_err(|e| format!("--near lon: {e}"))?,
+                    lat.trim()
+                        .parse::<f32>()
+                        .map_err(|e| format!("--near lat: {e}"))?,
+                    lon.trim()
+                        .parse::<f32>()
+                        .map_err(|e| format!("--near lon: {e}"))?,
                 ));
             }
             "--verify" => verify = true,
