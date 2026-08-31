@@ -78,7 +78,13 @@
 // "then" preview on a closely-chained pair, muting during a sustained
 // off-route excursion, clearing on arrival, and correctly re-deriving after
 // an off-route replan swap -- all degrading to "banner stays nil" on a v1
-// pack, since `steps` is empty on every leg there.
+// pack, since `steps` is empty on every leg there. Its voice steps (wayfinder #68) drive
+// `voiceMuted = true` for the whole smoke (proving mute gates speech only, never
+// `voiceEventLog`) and assert the far/near/now tier sequence against the literal EN templates,
+// supersede-not-queue on a jump straight to a later step's "now" tier, the hard-stop-and-log on
+// off-route reroute with no voice while the banner is muted, re-deriving against the new plan
+// after a replan lands, and the explicit arrival prompt racing (and beating) the arrive step's
+// own tier.
 import CoreLocation
 import CryptoKit
 import Darwin
@@ -1490,6 +1496,13 @@ enum Autotest {
         // ones (e.g. from a prior triplog-smoke run) untouched.
         let preexistingLogs = Set(TripLogStorage.list())
 
+        // wayfinder #68: muted for the whole smoke -- keeps this run silent on the sim AND
+        // proves muting gates SpeechController only, never `voiceEventLog` (the log must still
+        // fill below). `voiceMuted` is UserDefaults-backed (persists in the shared sim
+        // container), so it's restored to false at the very end -- a leaked `true` would
+        // silence the manual pass and any later launch.
+        driveStore.voiceMuted = true
+
         store.load()
         let ready = await waitWithTimeout(seconds: 120) { store.plannerStatus == .ready }
         report("planner-ready", ready)
@@ -1738,6 +1751,28 @@ enum Autotest {
                 altitude: 300, horizontalAccuracy: 5, verticalAccuracy: 5, course: -1, speed: 15, timestamp: time
             )
         }
+        // wayfinder #68: the voice tier ZONES (<=40 m "now", <=15 s "near") are NARROWER than the
+        // motorway stretch's vertex spacing, so a vertex-quantized fix can miss them entirely (the
+        // first gate run's A6 "now" fix landed 50+ m out and spoke the near template instead) --
+        // the voice fixes AND the banner-countdown approach fixes (which double as the tiers'
+        // silent stretch) interpolate the exact along-route coordinate; the interpolated point is
+        // ON its segment, so RouteSnap recovers the exact distance. The remaining banner fixes
+        // stay vertex-quantized: their asserts are distance-tolerant by construction.
+        func fix(atRouteM targetM: Double, at time: Date) -> CLLocation {
+            let clampedM = max(0, min(targetM, driveCumulativeM.last ?? 0))
+            let j = max(1, driveCumulativeM.firstIndex { $0 >= clampedM } ?? (driveCumulativeM.count - 1))
+            let segStartM = driveCumulativeM[j - 1]
+            let segLenM = driveCumulativeM[j] - segStartM
+            let t = segLenM > 0 ? (clampedM - segStartM) / segLenM : 0
+            let a = plan.polyline[j - 1]
+            let b = plan.polyline[j]
+            return CLLocation(
+                coordinate: CLLocationCoordinate2D(
+                    latitude: a.lat + t * (b.lat - a.lat), longitude: a.lon + t * (b.lon - a.lon)
+                ),
+                altitude: 300, horizontalAccuracy: 5, verticalAccuracy: 5, course: -1, speed: 15, timestamp: time
+            )
+        }
 
         // Step: throttle. Fix A ~2 km in at T, fix B one vertex later at T+0.2s (hud unchanged),
         // fix C another vertex later at T+1.5s (hud updated).
@@ -1770,20 +1805,44 @@ enum Autotest {
 
         // "banner-countdown"/"banner-advance" (wayfinder #67): pick the first guidance step past
         // 2500 m in (falling back to the last one) as an anchor, approach it with two fixes, then
-        // pass it with a third.
+        // pass it with a third. The "voice-tiers" fixes below (wayfinder #68) reuse this SAME
+        // anchor -- a real onRamp with a clean approach gap on the corridor pack.
         let anchorIndex: Int? = {
             if let k = expectedGuidance.firstIndex(where: { $0.distAlongRouteM > 2500 }) { return k }
             return expectedGuidance.isEmpty ? nil : expectedGuidance.count - 1
         }()
         let anchorM = anchorIndex.map { expectedGuidance[$0].distAlongRouteM } ?? 2500.0
 
-        if let vertexNear1 = firstVertexIndex(atOrAfterM: max(0, anchorM - 1200)),
-           let vertexNear2 = firstVertexIndex(atOrAfterM: max(0, anchorM - 400)) {
-            driveStore.ingest(fix(atVertex: vertexNear1, at: base.addingTimeInterval(3)))
+        // wayfinder #68: reimplemented locally, NOT calling VoicePromptScheduler's own private
+        // helper -- "voice-tiers" below asserts against the literal templates, scheduler-
+        // independent by construction.
+        func lowerFirst(_ s: String) -> String {
+            guard let first = s.first else { return s }
+            return first.lowercased() + s.dropFirst()
+        }
+
+        do {
+            // Both approach fixes at EXACT distances too (wayfinder #68, see fix(atRouteM:)'s
+            // comment): they double as the voice tiers' SILENT stretch (-1200: 80 s out, -400:
+            // 26.7 s out -- no tier), so they must not wander onto a sparse vertex inside a
+            // nearer tier's window -- the second gate run's -400 fix landed 53 m out and consumed
+            // the near tier early.
+            driveStore.ingest(fix(atRouteM: max(0, anchorM - 1200), at: base.addingTimeInterval(3)))
             let bannerNear1 = driveStore.banner
             let distAlongNear1 = driveStore.distanceAlongRouteM
 
-            driveStore.ingest(fix(atVertex: vertexNear2, at: base.addingTimeInterval(4.5)))
+            // "voice-tiers" far leg (wayfinder #68): slotted in BETWEEN the countdown's own two
+            // approach fixes -- at exactly 1000 m out the far tier is exactly eligible
+            // (66.7 s <= 70 s), so firing it here means vertexNear2 below (400 m out, also within
+            // the far window) correctly stays silent -- the tier is already spoken.
+            var expectedFarText: String?
+            if stepsPresent, let anchorIdx = anchorIndex {
+                driveStore.ingest(fix(atRouteM: anchorM - 1000, at: base.addingTimeInterval(3.5)))
+                let distFar = anchorM - driveStore.distanceAlongRouteM
+                expectedFarText = "In \(StepFormatter.spokenDistance(distFar)), \(lowerFirst(expectedGuidance[anchorIdx].primary))"
+            }
+
+            driveStore.ingest(fix(atRouteM: max(0, anchorM - 400), at: base.addingTimeInterval(4.5)))
             let bannerNear2 = driveStore.banner
             let distAlongNear2 = driveStore.distanceAlongRouteM
 
@@ -1803,9 +1862,40 @@ enum Autotest {
                     : "v1 pack, banner hidden"
             )
             ok = ok && countdownOk
-        } else {
-            report("banner-countdown", false, "polyline too short for banner-countdown's vertices")
-            ok = false
+
+            // "voice-tiers" near/now legs (wayfinder #68): completes the far/near/now sequence
+            // started above, around the SAME anchor, then asserts the exact literal texts
+            // against `voiceEventLog` -- built from the LITERAL templates, never by calling
+            // VoicePromptScheduler.
+            if stepsPresent, let anchorIdx = anchorIndex, let farText = expectedFarText {
+                let anchorStep = expectedGuidance[anchorIdx]
+                let thenSuffix = anchorStep.then.map { ", then \(lowerFirst($0))" } ?? ""
+
+                driveStore.ingest(fix(atRouteM: anchorM - 200, at: base.addingTimeInterval(4.7)))
+                let distNear = anchorM - driveStore.distanceAlongRouteM
+                let nearText = "In \(StepFormatter.spokenDistance(distNear)), \(lowerFirst(anchorStep.primary))" + thenSuffix
+
+                driveStore.ingest(fix(atRouteM: anchorM - 30, at: base.addingTimeInterval(4.9)))
+                let nowText = anchorStep.primary + thenSuffix
+
+                let last3 = Array(driveStore.voiceEventLog.suffix(3))
+                let expected3: [DriveStore.VoiceEvent] = [.spoke(farText), .spoke(nearText), .spoke(nowText)]
+                var tiersOk = last3 == expected3
+                // Corridor-only literal pin (same pattern as "banner-landmark"): the A6 onRamp's
+                // near-tier prompt, pinned against its real EN text.
+                if autotestRegion == "corridor" {
+                    tiersOk = tiersOk && nearText.hasPrefix("In 200 meters, take the ramp")
+                }
+                report("voice-tiers", tiersOk, "last3=\(last3) expected=\(expected3)")
+                ok = ok && tiersOk
+            } else if !stepsPresent {
+                let emptyOk = driveStore.voiceEventLog.isEmpty
+                report("voice-tiers", emptyOk, "v1 pack, voiceEventLog=\(driveStore.voiceEventLog)")
+                ok = ok && emptyOk
+            } else {
+                report("voice-tiers", false, "no guidance anchor for voice-tiers")
+                ok = false
+            }
         }
 
         if let vertexPastAnchor = firstVertexIndex(atOrAfterM: anchorM + StepTracker.passedBufferM + 5) {
@@ -1870,6 +1960,39 @@ enum Autotest {
             report("banner-then", true, "no close pair in plan")
         }
 
+        // "voice-replacement" (wayfinder #68): a later step with a clean approach gap (>= 400 m,
+        // so the far tier WOULD have been eligible had it been approached normally), jumped
+        // straight to its anchor-30 WITHOUT any preceding far/near fix for THIS step -- proves
+        // supersede-not-queue: exactly one new `.spoke` lands, the bare now prompt; the skipped
+        // far/near tiers are consumed by the newest prompt, never queued up behind it. Picked via
+        // search (like "banner-then" does), skip-with-report if no such step exists.
+        if stepsPresent, let anchorIdx = anchorIndex {
+            // Excludes the final entry: on this smoke's plan that's the `.arrive` step, whose
+            // own anchor-30 would race genuine destination arrival (a different, already-covered
+            // concern -- see "voice-arrival") rather than exercise supersede-not-queue.
+            let replacementIndex = ((anchorIdx + 1)..<max(anchorIdx + 1, expectedGuidance.count - 1)).first { i in
+                let gapM = expectedGuidance[i].distAlongRouteM - (i > 0 ? expectedGuidance[i - 1].distAlongRouteM : 0)
+                return gapM >= 400
+            }
+            if let replIdx = replacementIndex {
+                let replStep = expectedGuidance[replIdx]
+                let expectedNowText = replStep.primary + (replStep.then.map { ", then \(lowerFirst($0))" } ?? "")
+                let logCountBefore = driveStore.voiceEventLog.count
+                driveStore.ingest(fix(atRouteM: replStep.distAlongRouteM - 30, at: base.addingTimeInterval(7)))
+                let newEventCount = driveStore.voiceEventLog.count - logCountBefore
+                let replacementOk = newEventCount == 1 && driveStore.voiceEventLog.last == .spoke(expectedNowText)
+                report(
+                    "voice-replacement", replacementOk,
+                    "newEventCount=\(newEventCount) last=\(String(describing: driveStore.voiceEventLog.last)) expected=\(expectedNowText)"
+                )
+                ok = ok && replacementOk
+            } else {
+                report("voice-replacement", true, "no guidance step with a >= 400 m approach gap found after the anchor")
+            }
+        } else {
+            report("voice-replacement", true, "v1 pack, skipped")
+        }
+
         // Step: stop check-off, only meaningful if the plan has stops. (Timestamp shifted to +8,
         // wayfinder #67, to stay strictly after the banner fixes above at +3..+6.5.)
         let stops = ChargingStopVM.stops(from: plan)
@@ -1908,6 +2031,13 @@ enum Autotest {
         let bannerArrivalOk = driveStore.banner == nil
         report("banner-arrival", bannerArrivalOk, "banner=\(String(describing: driveStore.banner))")
         ok = ok && bannerArrivalOk
+
+        // "voice-arrival" (wayfinder #68): the arrive step's own `.now` tier races the ~40 m
+        // arrival cutover and loses (the `ingest` early return runs first) -- arrival speaks
+        // explicitly instead, so this is the log's LAST event regardless of pack version.
+        let voiceArrivalOk = driveStore.voiceEventLog.last == .spoke("You have arrived")
+        report("voice-arrival", voiceArrivalOk, "voiceEventLog=\(driveStore.voiceEventLog)")
+        ok = ok && voiceArrivalOk
 
         // Destination arrival also closes capture (wayfinder #62) with the end-SoC prompt.
         let arrivalStopsCaptureOk = tripStore.phase == .promptingEndSoc
@@ -1970,6 +2100,9 @@ enum Autotest {
         // "offroute-noise": a single GPS-noise excursion, back on-route before the 5 s sustain
         // bar, must not fire a replan.
         let planVersionBefore61 = store.planVersion
+        // wayfinder #68: marks where the excursion (noise + sustained) starts, for
+        // "voice-reroute-stop" below -- voice must stay frozen (banner nil) for this WHOLE span.
+        let voiceLogBeforeExcursion61 = driveStore.voiceEventLog.count
         driveStore.ingest(offsetFix61(at: base61))
         driveStore.ingest(CLLocation(
             coordinate: midCoordinate61, altitude: 300, horizontalAccuracy: 5, verticalAccuracy: 5,
@@ -2007,6 +2140,15 @@ enum Autotest {
         )
         ok = ok && replanOk
 
+        // "voice-reroute-stop" (wayfinder #68): the off-route excursion above (banner-muted's
+        // fixes) must have hard-stopped speech and logged it, AND no `.spoke` may have landed
+        // anywhere in that span -- voice is frozen the whole time the banner is nil.
+        let excursionVoiceEvents61 = Array(driveStore.voiceEventLog[voiceLogBeforeExcursion61...])
+        let rerouteStopOk = excursionVoiceEvents61.contains(.stopped)
+            && !excursionVoiceEvents61.contains { if case .spoke = $0 { return true }; return false }
+        report("voice-reroute-stop", rerouteStopOk, "events=\(excursionVoiceEvents61)")
+        ok = ok && rerouteStopOk
+
         // "offroute-origin-soc": the replan departs from the deviated position at the model's
         // own predicted SoC, not the settings slider.
         guard let newPlan61 = store.displayedPlan else {
@@ -2031,6 +2173,9 @@ enum Autotest {
         // polyline for the very next fix.
         let survivesInitialOk = driveStore.hud != nil && driveStore.checkedStopCount == 0 && driveStore.distanceAlongRouteM == 0
         let newGeometryVertex61 = newPlan61.polyline[min(10, newPlan61.polyline.count - 1)]
+        // wayfinder #68: marks where the post-adoption fix (this one) starts, for
+        // "voice-after-replan" below.
+        let voiceLogBeforeSurvives61 = driveStore.voiceEventLog.count
         driveStore.ingest(CLLocation(
             coordinate: CLLocationCoordinate2D(latitude: newGeometryVertex61.lat, longitude: newGeometryVertex61.lon),
             altitude: 300, horizontalAccuracy: 5, verticalAccuracy: 5, course: -1, speed: 15,
@@ -2066,6 +2211,36 @@ enum Autotest {
             "banner=\(String(describing: driveStore.banner)) newStepsPresent=\(newStepsPresent61)"
         )
         ok = ok && bannerAfterReplanOk
+
+        // "voice-after-replan" (wayfinder #68): the next `.spoke` (if any fires on this
+        // post-adoption fix) must refer to the NEW plan's guidance -- computed by calling
+        // VoicePromptScheduler with a FRESH `State()` against `newExpectedGuidance61`, exactly
+        // replicating what DriveStore itself just did (its own `voiceState` was reset by this
+        // replan's `snapshotPlan`, so this is the first prompt evaluation on the new plan too).
+        // Built purely from the new plan's own step text, so it can never coincide with a prompt
+        // "referencing" the OLD plan's (pre-replan `expectedGuidance`) steps.
+        var freshVoiceState61 = VoicePromptScheduler.State()
+        let newUpcomingIdxForVoice61 = newStepsPresent61
+            ? StepTracker.upcomingIndex(steps: newExpectedGuidance61, distanceAlongRouteM: driveStore.distanceAlongRouteM)
+            : nil
+        let expectedPostAdoptionPrompt61 = newUpcomingIdxForVoice61.flatMap {
+            VoicePromptScheduler.nextPrompt(
+                state: &freshVoiceState61, steps: newExpectedGuidance61, upcomingIndex: $0,
+                distanceAlongRouteM: driveStore.distanceAlongRouteM, speedMPerS: 15
+            )
+        }
+        let postAdoptionEvents61 = Array(driveStore.voiceEventLog[voiceLogBeforeSurvives61...])
+        let afterReplanOk: Bool
+        if let expectedPrompt = expectedPostAdoptionPrompt61 {
+            afterReplanOk = postAdoptionEvents61 == [.spoke(expectedPrompt.text)]
+        } else {
+            afterReplanOk = postAdoptionEvents61.isEmpty
+        }
+        report(
+            "voice-after-replan", afterReplanOk,
+            "events=\(postAdoptionEvents61) expected=\(String(describing: expectedPostAdoptionPrompt61?.text))"
+        )
+        ok = ok && afterReplanOk
 
         driveStore.end()
         tripStore.confirmEndSoc(55)
@@ -2220,6 +2395,10 @@ enum Autotest {
         for url in TripLogStorage.list() where !preexistingLogs.contains(url) {
             try? TripLogStorage.delete(url: url)
         }
+
+        // wayfinder #68: restore -- UserDefaults persists in the shared sim container, so a
+        // leaked `true` would silence the manual pass and any later launch.
+        driveStore.voiceMuted = false
 
         await finish(ok: ok)
     }

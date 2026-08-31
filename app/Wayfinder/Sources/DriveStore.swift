@@ -32,6 +32,12 @@
 // but-unreplanned or mid-replan, same as the HUD stays live but the banner shouldn't imply a
 // route that may no longer be current. `guidanceSteps` is rebuilt at every `snapshotPlan` call,
 // so a replan swap can never leave a banner pointing at stale step indices.
+//
+// Voice guidance (wayfinder #68, the banner's audio twin): `SpeechController` speaks tiered
+// prompts computed by `VoicePromptScheduler` from the same `guidanceSteps`/`distanceAlongRouteM`
+// the banner reads -- muted by the IDENTICAL shared gate (banner nil <=> voice frozen), and
+// logged to `voiceEventLog` as a test seam that's appended to ALWAYS, mute or not, so muting
+// only silences `SpeechController`, never the assertable log.
 import CoreLocation
 import Foundation
 import MapLibre
@@ -77,6 +83,10 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
     /// upcoming step (v1 pack, guidance exhausted) or guidance is muted (off-route-but-
     /// unreplanned, mid-replan) -- see `computeBanner`.
     private(set) var banner: ManeuverBanner?
+    /// Voice guidance test seam (wayfinder #68): every prompt/stop event, appended REGARDLESS of
+    /// `voiceMuted` -- the store-side assertable truth for what would have spoken, independent of
+    /// whether `SpeechController` was actually allowed to speak it. Reset on each `enterDrive`.
+    private(set) var voiceEventLog: [VoiceEvent] = []
     /// Charging Stops passed -- an index into `stopVMs` (and `plan.stops`), not a count of
     /// arbitrary events: ADR 0012 point 3's only stepper.
     private(set) var checkedStopCount = 0
@@ -114,10 +124,26 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
         let then: String?
     }
 
+    /// Voice guidance test seam (wayfinder #68) -- see `voiceEventLog`.
+    enum VoiceEvent: Equatable {
+        case spoke(String)
+        case stopped
+    }
+
     /// ADR 0012 point 2's Go gate: origin provenance (adopted from a location fix, not
     /// overridden since) and a plan actually on screen.
     var canGo: Bool {
         phase == .idle && planStore.displayedPlan != nil && planStore.originIsCurrentLocation
+    }
+
+    /// Voice guidance mute (wayfinder #68), for the drive-controls mute button and drive-smoke.
+    /// A STORED observable mirror of `SpeechController`'s UserDefaults-persisted flag, not a
+    /// computed forward: @Observable tracks stored properties only, so a computed getter reading
+    /// UserDefaults would never invalidate the mute button's view (its label would freeze --
+    /// the first gate run failed exactly there). `didSet` keeps SpeechController authoritative
+    /// for persistence and the hard-stop side effect.
+    var voiceMuted: Bool = UserDefaults.standard.bool(forKey: "voiceMuted") {
+        didSet { speech.muted = voiceMuted }
     }
 
     private let planStore: PlanStore
@@ -133,6 +159,10 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
     /// The current Plan's banner-eligible steps (wayfinder #67), rebuilt on every `snapshotPlan`
     /// call -- see that method and `computeBanner`.
     private var guidanceSteps: [StepTracker.GuidanceStep] = []
+    /// Voice guidance (wayfinder #68): the AVSpeechSynthesizer wrapper and the tier-scheduling
+    /// bookkeeping, reset on every `snapshotPlan` swap -- see that method's comment.
+    private let speech = SpeechController()
+    private var voiceState = VoicePromptScheduler.State()
     /// Cumulative leg-end distances, one entry per `drivePlan.legs`; `legEndsM.last == totalDistM`.
     private var legEndsM: [Double] = []
     /// Per-leg average speed (`leg.distM / leg.driveS`), 0 for a zero-duration leg.
@@ -206,6 +236,9 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
         offRouteSinceFixTimestamp = nil
         replanInFlight = false
         driveSession += 1
+        // wayfinder #68: the voice log's story starts fresh each drive, same reasoning as the
+        // flags above -- a re-entered drive must not carry over the previous drive's spoken log.
+        voiceEventLog = []
         snapshotPlan(plan)
         snappedCoordinate = nil
         isOnRoute = false
@@ -281,6 +314,9 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
         // wayfinder #67: rebuilt here, the same atomic swap point `hud` uses -- a banner index
         // can never survive a snapshot swap by construction.
         guidanceSteps = StepTracker.guidanceSteps(legs: plan.legs, stops: stopVMs, polyline: routePolyline, cumulativeM: routeCumulativeM)
+        // wayfinder #68: mirrors the comment above -- voice bookkeeping is keyed to a step index
+        // too, so it can't survive a snapshot swap either.
+        voiceState = VoicePromptScheduler.State()
         banner = computeBanner()
     }
 
@@ -293,6 +329,9 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
     func end() {
         guard phase != .idle else { return }
         locationManager.stopUpdatingLocation()
+        // wayfinder #68: no log entry -- the drive is over, the voiceEventLog's story ends at
+        // the last fix.
+        speech.stop()
         if let puckAnnotation { planStore.mapView.removeAnnotation(puckAnnotation) }
         puckAnnotation = nil
         planStore.mapView.showsUserLocation = true
@@ -340,6 +379,11 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
             lastHudFixTimestamp = location.timestamp
             locationManager.stopUpdatingLocation()
             if tripStore.phase == .recording { tripStore.stopTapped() }
+            // Voice guidance (wayfinder #68): the arrive step's own `.now` tier at <=40 m races
+            // this ~40 m arrival cutover and loses -- this branch returns before the scheduler
+            // below ever runs -- so arrival speaks explicitly instead.
+            voiceEventLog.append(.spoke("You have arrived"))
+            speech.speak("You have arrived")
             return
         }
 
@@ -386,6 +430,24 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
         // (off-route-but-unreplanned) is current-fix-accurate.
         banner = computeBanner()
 
+        // Voice guidance (wayfinder #68): shares the banner's mute gate exactly -- `banner` nil
+        // means guidance is frozen (v1 pack, off-route-but-unreplanned, mid-replan, none left),
+        // and voice must never speak into that state either.
+        if banner != nil, let upcomingIdx = StepTracker.upcomingIndex(steps: guidanceSteps, distanceAlongRouteM: distanceAlongRouteM) {
+            // Negative speed is invalid, same convention `location.course` uses above; fall back
+            // to the current leg's average, and further to 15 m/s if that's zero (a zero-duration
+            // leg).
+            let legSpeedMPerS = legAvgSpeedMPerS.indices.contains(currentLegIndex) ? legAvgSpeedMPerS[currentLegIndex] : 0
+            let effectiveSpeedMPerS = location.speed > 0 ? location.speed : (legSpeedMPerS > 0 ? legSpeedMPerS : 15)
+            if let prompt = VoicePromptScheduler.nextPrompt(
+                state: &voiceState, steps: guidanceSteps, upcomingIndex: upcomingIdx,
+                distanceAlongRouteM: distanceAlongRouteM, speedMPerS: effectiveSpeedMPerS
+            ) {
+                voiceEventLog.append(.spoke(prompt.text))
+                speech.speak(prompt.text)
+            }
+        }
+
         // HUD throttle (ADR 0012 point 3, >=1 s UI deltas): keyed on the FIX's own timestamp,
         // not wall-clock time, so this is deterministic for drive-smoke's synthetic fixes -- a
         // stop/leg advance always updates immediately regardless of the throttle window.
@@ -424,6 +486,12 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
     /// on completion only if this drive session is still current and still driving -- see
     /// `driveSession`'s comment.
     private func triggerDriveReplan(from coordinate: CLLocationCoordinate2D, departSoc: Double) {
+        // Voice guidance (wayfinder #68): hard-stop in-flight speech before the reroute -- the
+        // research doc's mandated behavior. Logged unconditionally, like every voiceEventLog
+        // entry.
+        voiceEventLog.append(.stopped)
+        speech.stop()
+
         replanInFlight = true
         offRouteSinceFixTimestamp = nil
 

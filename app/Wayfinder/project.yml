@@ -28,6 +28,7 @@ targets:
         NSLocationWhenInUseUsageDescription: "Shows map data and charging stops for your route, and records your GPS trace during Trip Log capture. When a Trip Log is saved, an approximate (rounded) midpoint is sent to Open-Meteo to fetch the outside temperature."
         UIBackgroundModes:
           - location
+          - audio
         CADisableMinimumFrameDurationOnPhone: true
     settings:
       base:

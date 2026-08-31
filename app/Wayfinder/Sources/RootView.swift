@@ -11,9 +11,10 @@
 // core (wayfinder #59, ADR 0012 point 8) hides the planning UI entirely while driving or
 // arrived (`driveStore.phase != .idle`) -- the route editor, the settings/trip-record/locate-me
 // buttons, the charger callout, and the result card -- replacing them with a bottom
-// drive-controls bar (overview toggle, End, a conditional Re-center, and the drive HUD card,
-// wayfinder #60) while driving, and a simple arrival card once `.arrived`. Toasts stay outside
-// the phase switch so they keep working during a drive.
+// drive-controls bar (overview toggle, End, a conditional Re-center, a mute toggle for voice
+// guidance (wayfinder #68), and the drive HUD card, wayfinder #60) while driving, and a simple
+// arrival card once `.arrived`. Toasts stay outside the phase switch so they keep working
+// during a drive.
 import SwiftUI
 
 struct RootView: View {
@@ -270,6 +271,7 @@ struct RootView: View {
             }
             Spacer()
             HStack {
+                driveMuteButton
                 driveOverviewButton
                 Spacer()
                 if driveStore.cameraMode != .following {
@@ -317,6 +319,25 @@ struct RootView: View {
             .padding(.horizontal, 16)
             .padding(.bottom, 8)
         }
+    }
+
+    /// Voice guidance mute (wayfinder #68): flat Button with only an Image label, same idiom as
+    /// `driveOverviewButton`/`driveRecenterButton` below -- the identifier goes on the Button
+    /// itself, not the Image (ManeuverBannerView's header records the trap: an identifier only
+    /// needs to move to a leaf when a container has descendant Text identifiers it would shadow).
+    private var driveMuteButton: some View {
+        Button {
+            driveStore.voiceMuted.toggle()
+        } label: {
+            Image(systemName: driveStore.voiceMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                .font(.headline)
+                .foregroundColor(.blue)
+                .frame(width: 44, height: 44)
+                .background(.regularMaterial, in: Circle())
+                .shadow(color: .black.opacity(0.2), radius: 4, y: 2)
+        }
+        .accessibilityIdentifier("drive-mute-button")
+        .accessibilityLabel(driveStore.voiceMuted ? "Unmute voice" : "Mute voice")
     }
 
     private var driveOverviewButton: some View {

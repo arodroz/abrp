@@ -101,6 +101,25 @@ enum StepFormatter {
         return "\(Int((clamped / 10).rounded() * 10)) m"
     }
 
+    /// Spoken form of a distance for voice prompts (wayfinder #68) -- coarser than
+    /// `formatDistance`'s HUD/banner text, since a spoken number needs to be sayable in one
+    /// breath rather than exact: nearest 50 m (min 50) under 1 km, one decimal (trailing .0
+    /// dropped) from 1-10 km, whole km above that; "1 kilometer" singular exactly at "1".
+    static func spokenDistance(_ meters: Double) -> String {
+        let clamped = max(0, meters)
+        if clamped >= 10_000 {
+            return "\(Int((clamped / 1000).rounded())) kilometers"
+        }
+        if clamped >= 1_000 {
+            let km = (clamped / 1000 * 10).rounded() / 10
+            var rendered = String(format: "%.1f", km)
+            if rendered.hasSuffix(".0") { rendered.removeLast(2) }
+            return rendered == "1" ? "1 kilometer" : "\(rendered) kilometers"
+        }
+        let roundedM = max(50, Int((clamped / 50).rounded() * 50))
+        return "\(roundedM) meters"
+    }
+
     // MARK: Helpers
 
     private static func roadLabel(_ step: FfiStep) -> String? {

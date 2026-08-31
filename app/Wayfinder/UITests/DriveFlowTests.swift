@@ -17,7 +17,9 @@
 // the shared simulator container for other suites to trip over. Manual mid-drive SoC correction
 // (wayfinder #63) is covered too, but only as far as tapping the card's SoC number opens and
 // Cancels the "Correct SoC" alert -- the replan itself needs a snapped position drive-smoke
-// provides.
+// provides. The voice guidance mute toggle (wayfinder #68) is checked here too, but only for its
+// label flipping on tap -- whether prompts actually fire is drive-smoke's `voiceEventLog` job,
+// since XCUITest can't observe spoken audio.
 import XCTest
 
 final class DriveFlowTests: WayfinderUITestCase {
@@ -59,6 +61,28 @@ final class DriveFlowTests: WayfinderUITestCase {
             if chartGone { break }
         }
         XCTAssertTrue(chartGone, "soc-chart still present after collapsing the drive card, even after 3 retries")
+
+        // Voice guidance mute toggle (wayfinder #68): persists across launches (UserDefaults),
+        // so tap it back at the end to leave the setting as this test found it.
+        let muteButton = el("drive-mute-button")
+        XCTAssertTrue(waitForExistence(muteButton, timeout: 10), "drive-mute-button never appeared")
+        let initialMuteLabel = muteButton.label
+        // Tap-retry, same rationale as the chart-collapse retry above: this button row sits
+        // directly ABOVE the card whose collapse spring is still settling, so a tap synthesized
+        // at the pre-settle frame can miss the (moving) button entirely -- verified by the tap
+        // leaving no trace in UserDefaults on the first gate runs.
+        var muteLabelChanged = false
+        for _ in 0..<3 {
+            muteButton.tap()
+            let muteDeadline = Date().addingTimeInterval(2)
+            while Date() < muteDeadline, !muteLabelChanged {
+                muteLabelChanged = muteButton.label != initialMuteLabel
+                if !muteLabelChanged { RunLoop.current.run(until: Date().addingTimeInterval(0.2)) }
+            }
+            if muteLabelChanged { break }
+        }
+        XCTAssertTrue(muteLabelChanged, "drive-mute-button's label didn't change after tapping it, even after 3 retries")
+        muteButton.tap()
 
         // Manual SoC correction (wayfinder #63): the card's SoC number opens the dash-SoC alert.
         // Cancel deliberately -- XCUITest can't inject fixes, so there's no snapped position for a
