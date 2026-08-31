@@ -234,6 +234,10 @@ final class PlanStore: NSObject, @preconcurrency MLNMapViewDelegate, @preconcurr
         activeRegion = region
         UserDefaults.standard.set(region, forKey: Self.activeRegionKey)
 
+        resetRouteStateAndReload()
+    }
+
+    private func resetRouteStateAndReload() {
         destination = nil
         waypoints = []
         plan = nil
@@ -251,6 +255,15 @@ final class PlanStore: NSObject, @preconcurrency MLNMapViewDelegate, @preconcurr
         packStatus = .missing
 
         load()
+    }
+
+    /// Adoption for in-place pack changes (wayfinder #55): an install/update that landed on the
+    /// active region reloads the planner the same way switching regions does -- the old .rpack
+    /// stays mmapped otherwise and the app silently keeps planning on it until relaunch. Any
+    /// other region is a no-op (its files are picked up when it becomes active).
+    func packsDidChange(region: String) {
+        guard region == activeRegion else { return }
+        resetRouteStateAndReload()
     }
 
     func load() {

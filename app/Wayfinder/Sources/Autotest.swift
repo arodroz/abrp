@@ -126,7 +126,7 @@ enum Autotest {
             }
         case "install-smoke":
             Task.detached(priority: .userInitiated) {
-                await runInstallSmoke(installer: installer)
+                await runInstallSmoke(installer: installer, store: store)
             }
         case "triplog-smoke":
             Task.detached(priority: .userInitiated) {
@@ -729,7 +729,7 @@ enum Autotest {
     /// then deletes the region and checks the artifact files + record are gone while the
     /// shared style files remain.
     @MainActor
-    private static func runInstallSmoke(installer: PackInstaller) async {
+    private static func runInstallSmoke(installer: PackInstaller, store: PlanStore) async {
         var ok = true
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
 
@@ -820,6 +820,46 @@ enum Autotest {
         }
         report("backup-excluded", backupExcludedOk)
         ok = ok && backupExcludedOk
+
+        // -- Adoption (wayfinder #55): an install/update that lands on the *active* pack region
+        // must reload the live Planner in place, the same way switching regions does -- otherwise
+        // the app keeps planning on the old mmapped .rpack until relaunch.
+        let originalRegion = store.activeRegion
+        store.setActiveRegion("lu-dev")
+        let switchedToLuDev = await waitWithTimeout(seconds: 15) {
+            guard case .loaded(let region) = store.packStatus, region == "lu-dev" else { return false }
+            return store.chargerCount == 17
+        }
+        report(
+            "adopt-switch-to-lu-dev", switchedToLuDev,
+            "chargerCount=\(store.chargerCount) packStatus=\(store.packStatus)"
+        )
+        ok = ok && switchedToLuDev
+
+        // Not the active region -- a no-op, no reset.
+        store.packsDidChange(region: "eu-west")
+        let inactiveNoopOk = store.chargerCount == 17
+        report("adopt-inactive-noop", inactiveNoopOk, "chargerCount=\(store.chargerCount)")
+        ok = ok && inactiveNoopOk
+
+        // The active region -- `resetRouteStateAndReload` runs synchronously on the main actor
+        // before `packsDidChange` returns, so the reset is observable immediately; the reload it
+        // kicks off lands asynchronously.
+        store.packsDidChange(region: "lu-dev")
+        let resetRanSynchronously = store.chargerCount == 0
+        let reloadedAfterAdoption = await waitWithTimeout(seconds: 15) {
+            guard case .loaded(let region) = store.packStatus, region == "lu-dev" else { return false }
+            return store.chargerCount == 17
+        }
+        report(
+            "adopt-active-reload-cycle", resetRanSynchronously && reloadedAfterAdoption,
+            "syncReset=\(resetRanSynchronously) reloaded=\(reloadedAfterAdoption)"
+        )
+        ok = ok && resetRanSynchronously && reloadedAfterAdoption
+
+        // Restore -- a no-op if unchanged; if originalRegion's pack isn't present the load falls
+        // to .missing, which is fine, this isn't asserted on.
+        store.setActiveRegion(originalRegion)
 
         do {
             try installer.delete(region: "lu-dev")

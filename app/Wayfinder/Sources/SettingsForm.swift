@@ -380,7 +380,12 @@ struct SettingsForm: View {
     /// records them into `lastOperationError`, rendered as the footnote row above.
     private func runInstall(_ row: PackInstaller.RegionRow) {
         Task {
-            do { try await installer.install(region: row.id) } catch {}
+            do {
+                try await installer.install(region: row.id)
+                // Adoption (wayfinder #55): a successful install/update that landed on the
+                // active region must reload the planner, or it keeps running on the old .rpack.
+                store.packsDidChange(region: row.id)
+            } catch {}
         }
     }
 
