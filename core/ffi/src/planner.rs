@@ -10,8 +10,9 @@ use routing::Router;
 
 use crate::error::PlannerError;
 use crate::mapping::{
-    build_polyline, build_soc_curve, calibration_of, corridor_request_of, ffi_plan_alt_of,
-    ffi_plan_of, map_assemble_error, plan_request_of, validate_cpack_format, vehicle_of,
+    build_leg_steps, build_polyline, build_soc_curve, calibration_of, corridor_request_of,
+    ffi_plan_alt_of, ffi_plan_of, map_assemble_error, plan_request_of, validate_cpack_format,
+    vehicle_of,
 };
 use crate::triplog::calibrate_of;
 use crate::types::{FfiCalibrationResult, FfiLegInput, FfiPlan, FfiPlanRequest, FfiVehicle};
@@ -109,12 +110,23 @@ impl Planner {
 
         let polyline = build_polyline(&self.pack, &plan);
         let soc_curve = build_soc_curve(&plan);
-        let alternative = plan
-            .alternative
-            .as_ref()
-            .map(|alt| ffi_plan_alt_of(alt, build_polyline(&self.pack, alt), build_soc_curve(alt)));
+        let leg_steps = build_leg_steps(&self.pack, &plan);
+        let alternative = plan.alternative.as_ref().map(|alt| {
+            ffi_plan_alt_of(
+                alt,
+                build_polyline(&self.pack, alt),
+                build_soc_curve(alt),
+                build_leg_steps(&self.pack, alt),
+            )
+        });
 
-        Ok(ffi_plan_of(&plan, polyline, soc_curve, alternative))
+        Ok(ffi_plan_of(
+            &plan,
+            polyline,
+            soc_curve,
+            leg_steps,
+            alternative,
+        ))
     }
 
     /// Sets the cancel flag `plan()` polls (ADR 0004 point 4); `plan()`

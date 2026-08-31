@@ -14,8 +14,8 @@ use packs::Rpack;
 
 use crate::error::PlannerError;
 use crate::types::{
-    FfiGeoPoint, FfiLeg, FfiPlan, FfiPlanAlt, FfiPlanRequest, FfiSocPoint, FfiStop, FfiVehicle,
-    FfiWaypoint,
+    FfiGeoPoint, FfiLeg, FfiManeuver, FfiManeuverModifier, FfiPlan, FfiPlanAlt, FfiPlanRequest,
+    FfiSocPoint, FfiStep, FfiStop, FfiVehicle, FfiWaypoint,
 };
 
 const CPACK_FORMAT: &str = "cpack-1";
@@ -100,7 +100,7 @@ fn endpoint_label(plan: &Plan, ep: &Endpoint) -> String {
     }
 }
 
-fn ffi_leg_of(plan: &Plan, leg: &PlanLeg) -> FfiLeg {
+fn ffi_leg_of(plan: &Plan, leg: &PlanLeg, steps: Vec<FfiStep>) -> FfiLeg {
     FfiLeg {
         from_label: endpoint_label(plan, &leg.from),
         to_label: endpoint_label(plan, &leg.to),
@@ -111,7 +111,20 @@ fn ffi_leg_of(plan: &Plan, leg: &PlanLeg) -> FfiLeg {
         depart_soc: leg.depart_soc,
         arrival_soc: leg.arrival_soc,
         flags: leg.flags.iter().map(|f| format!("{f:?}")).collect(),
+        steps,
     }
+}
+
+/// Zips `plan.legs` with `leg_steps` into `FfiLeg`s; defensive against a
+/// length mismatch (a missing leg just gets empty steps) even though
+/// `build_leg_steps` always returns one entry per leg.
+fn ffi_legs_of(plan: &Plan, mut leg_steps: Vec<Vec<FfiStep>>) -> Vec<FfiLeg> {
+    leg_steps.resize(plan.legs.len(), Vec::new());
+    plan.legs
+        .iter()
+        .zip(leg_steps)
+        .map(|(leg, steps)| ffi_leg_of(plan, leg, steps))
+        .collect()
 }
 
 fn ffi_stop_of(sites: &[ChargerSite], stop: &Stop) -> FfiStop {
@@ -181,16 +194,17 @@ pub fn build_soc_curve(plan: &Plan) -> Vec<FfiSocPoint> {
     points
 }
 
-/// Builds the non-recursive alternative-plan record; `polyline`/`soc_curve`
-/// are the alternative `Plan`'s own (built by the caller, which has the
-/// `&Rpack` this module deliberately doesn't need).
+/// Builds the non-recursive alternative-plan record; `polyline`/`soc_curve`/
+/// `leg_steps` are the alternative `Plan`'s own (built by the caller, which
+/// has the `&Rpack` this module deliberately doesn't need).
 pub fn ffi_plan_alt_of(
     plan: &Plan,
     polyline: Vec<FfiGeoPoint>,
     soc_curve: Vec<FfiSocPoint>,
+    leg_steps: Vec<Vec<FfiStep>>,
 ) -> FfiPlanAlt {
     FfiPlanAlt {
-        legs: plan.legs.iter().map(|l| ffi_leg_of(plan, l)).collect(),
+        legs: ffi_legs_of(plan, leg_steps),
         stops: plan
             .stops
             .iter()
@@ -210,10 +224,11 @@ pub fn ffi_plan_of(
     plan: &Plan,
     polyline: Vec<FfiGeoPoint>,
     soc_curve: Vec<FfiSocPoint>,
+    leg_steps: Vec<Vec<FfiStep>>,
     alternative: Option<FfiPlanAlt>,
 ) -> FfiPlan {
     FfiPlan {
-        legs: plan.legs.iter().map(|l| ffi_leg_of(plan, l)).collect(),
+        legs: ffi_legs_of(plan, leg_steps),
         stops: plan
             .stops
             .iter()
@@ -271,6 +286,64 @@ pub fn build_polyline(pack: &Rpack, plan: &Plan) -> Vec<FfiGeoPoint> {
     }
 
     out
+}
+
+fn ffi_maneuver_of(m: guidance::ManeuverType) -> FfiManeuver {
+    match m {
+        guidance::ManeuverType::Depart => FfiManeuver::Depart,
+        guidance::ManeuverType::Arrive => FfiManeuver::Arrive,
+        guidance::ManeuverType::Turn => FfiManeuver::Turn,
+        guidance::ManeuverType::Continue => FfiManeuver::Continue,
+        guidance::ManeuverType::OffRamp => FfiManeuver::OffRamp,
+        guidance::ManeuverType::OnRamp => FfiManeuver::OnRamp,
+        guidance::ManeuverType::Fork => FfiManeuver::Fork,
+        guidance::ManeuverType::EndOfRoad => FfiManeuver::EndOfRoad,
+        guidance::ManeuverType::Roundabout => FfiManeuver::Roundabout,
+    }
+}
+
+fn ffi_maneuver_modifier_of(m: guidance::ManeuverModifier) -> FfiManeuverModifier {
+    match m {
+        guidance::ManeuverModifier::Straight => FfiManeuverModifier::Straight,
+        guidance::ManeuverModifier::SlightLeft => FfiManeuverModifier::SlightLeft,
+        guidance::ManeuverModifier::SlightRight => FfiManeuverModifier::SlightRight,
+        guidance::ManeuverModifier::Left => FfiManeuverModifier::Left,
+        guidance::ManeuverModifier::Right => FfiManeuverModifier::Right,
+        guidance::ManeuverModifier::SharpLeft => FfiManeuverModifier::SharpLeft,
+        guidance::ManeuverModifier::SharpRight => FfiManeuverModifier::SharpRight,
+        guidance::ManeuverModifier::UTurn => FfiManeuverModifier::UTurn,
+    }
+}
+
+fn ffi_step_of(s: guidance::Step) -> FfiStep {
+    FfiStep {
+        maneuver: ffi_maneuver_of(s.maneuver),
+        modifier: ffi_maneuver_modifier_of(s.modifier),
+        exit_count: s.exit_count,
+        name: s.name,
+        road_ref: s.road_ref,
+        dest: s.dest,
+        dest_ref: s.dest_ref,
+        exit_ref: s.exit_ref,
+        lat: s.lat,
+        lon: s.lon,
+        dist_from_leg_start_m: s.dist_from_leg_start_m,
+    }
+}
+
+/// One `guidance::steps_for_route` call per Leg, mapped to the wire shape.
+/// Needs `&Rpack`, so like `build_polyline` this is exercised by the Swift
+/// golden test rather than a Rust unit test.
+pub fn build_leg_steps(pack: &Rpack, plan: &Plan) -> Vec<Vec<FfiStep>> {
+    plan.legs
+        .iter()
+        .map(|leg| {
+            guidance::steps_for_route(pack, &leg.route_edges)
+                .into_iter()
+                .map(ffi_step_of)
+                .collect()
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -391,7 +464,7 @@ mod tests {
     #[test]
     fn ffi_plan_of_labels_endpoints_and_carries_totals() {
         let plan = tiny_plan();
-        let ffi = ffi_plan_of(&plan, vec![], vec![], None);
+        let ffi = ffi_plan_of(&plan, vec![], vec![], vec![], None);
 
         assert_eq!(ffi.legs.len(), 2);
         assert_eq!(ffi.legs[0].from_label, "Origin");

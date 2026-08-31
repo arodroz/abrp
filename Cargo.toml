@@ -5,6 +5,7 @@ members = [
     "core/routing",
     "core/energy",
     "core/optimiser",
+    "core/guidance",
     "core/ffi",
     "pipeline",
 ]

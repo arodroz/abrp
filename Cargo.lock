@@ -379,6 +379,7 @@ name = "ffi"
 version = "0.1.0"
 dependencies = [
  "energy",
+ "guidance",
  "optimiser",
  "packs",
  "routing",
@@ -470,6 +471,15 @@ dependencies = [
  "log",
  "plain",
  "scroll",
+]
+
+[[package]]
+name = "guidance"
+version = "0.1.0"
+dependencies = [
+ "packs",
+ "pipeline",
+ "tempfile",
 ]
 
 [[package]]
@@ -712,6 +722,7 @@ name = "optimiser"
 version = "0.1.0"
 dependencies = [
  "energy",
+ "guidance",
  "packs",
  "pipeline",
  "routing",

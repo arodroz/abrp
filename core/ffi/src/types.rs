@@ -59,6 +59,50 @@ pub struct FfiSocPoint {
     pub soc: f64,
 }
 
+/// Mirrors `guidance::ManeuverType` 1:1 (wayfinder #66).
+#[derive(Debug, Clone, Copy, PartialEq, uniffi::Enum)]
+pub enum FfiManeuver {
+    Depart,
+    Arrive,
+    Turn,
+    Continue,
+    OffRamp,
+    OnRamp,
+    Fork,
+    EndOfRoad,
+    Roundabout,
+}
+
+/// Mirrors `guidance::ManeuverModifier` 1:1 (wayfinder #66).
+#[derive(Debug, Clone, Copy, PartialEq, uniffi::Enum)]
+pub enum FfiManeuverModifier {
+    Straight,
+    SlightLeft,
+    SlightRight,
+    Left,
+    Right,
+    SharpLeft,
+    SharpRight,
+    UTurn,
+}
+
+/// One maneuver step (wayfinder #66): structured data only, no baked
+/// sentences (that's app-side, #67).
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct FfiStep {
+    pub maneuver: FfiManeuver,
+    pub modifier: FfiManeuverModifier,
+    pub exit_count: Option<u32>,
+    pub name: String,
+    pub road_ref: String,
+    pub dest: String,
+    pub dest_ref: String,
+    pub exit_ref: String,
+    pub lat: f64,
+    pub lon: f64,
+    pub dist_from_leg_start_m: f64,
+}
+
 /// One driven Leg, endpoints resolved to human-referenceable labels
 /// (`"Origin"`/`"Dest"`/a charger's name/`"Waypoint N"`) since Swift never
 /// sees the candidate graph's node indices.
@@ -74,6 +118,9 @@ pub struct FfiLeg {
     pub depart_soc: f64,
     pub arrival_soc: f64,
     pub flags: Vec<String>,
+    /// Turn-by-turn steps for this Leg's route (wayfinder #66); empty for a
+    /// v1 pack or a Leg with no route edges.
+    pub steps: Vec<FfiStep>,
 }
 
 /// One Charging Stop.

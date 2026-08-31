@@ -1035,13 +1035,22 @@ public struct FfiLeg: Equatable, Hashable {
     public var departSoc: Double
     public var arrivalSoc: Double
     public var flags: [String]
+    /**
+     * Turn-by-turn steps for this Leg's route (wayfinder #66); empty for a
+     * v1 pack or a Leg with no route edges.
+     */
+    public var steps: [FfiStep]
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
     public init(fromLabel: String, toLabel: String, driveS: Double, distM: Double, energyWh: Double, 
         /**
          * The chosen Speed Cap, `None` when uncapped (ADR 0010 point 1).
-         */speedCapKmh: Double?, departSoc: Double, arrivalSoc: Double, flags: [String]) {
+         */speedCapKmh: Double?, departSoc: Double, arrivalSoc: Double, flags: [String], 
+        /**
+         * Turn-by-turn steps for this Leg's route (wayfinder #66); empty for a
+         * v1 pack or a Leg with no route edges.
+         */steps: [FfiStep]) {
         self.fromLabel = fromLabel
         self.toLabel = toLabel
         self.driveS = driveS
@@ -1051,6 +1060,7 @@ public struct FfiLeg: Equatable, Hashable {
         self.departSoc = departSoc
         self.arrivalSoc = arrivalSoc
         self.flags = flags
+        self.steps = steps
     }
 
     
@@ -1077,7 +1087,8 @@ public struct FfiConverterTypeFfiLeg: FfiConverterRustBuffer {
                 speedCapKmh: FfiConverterOptionDouble.read(from: &buf), 
                 departSoc: FfiConverterDouble.read(from: &buf), 
                 arrivalSoc: FfiConverterDouble.read(from: &buf), 
-                flags: FfiConverterSequenceString.read(from: &buf)
+                flags: FfiConverterSequenceString.read(from: &buf), 
+                steps: FfiConverterSequenceTypeFfiStep.read(from: &buf)
         )
     }
 
@@ -1091,6 +1102,7 @@ public struct FfiConverterTypeFfiLeg: FfiConverterRustBuffer {
         FfiConverterDouble.write(value.departSoc, into: &buf)
         FfiConverterDouble.write(value.arrivalSoc, into: &buf)
         FfiConverterSequenceString.write(value.flags, into: &buf)
+        FfiConverterSequenceTypeFfiStep.write(value.steps, into: &buf)
     }
 }
 
@@ -1548,6 +1560,100 @@ public func FfiConverterTypeFfiSocPoint_lower(_ value: FfiSocPoint) -> RustBuffe
 
 
 /**
+ * One maneuver step (wayfinder #66): structured data only, no baked
+ * sentences (that's app-side, #67).
+ */
+public struct FfiStep: Equatable, Hashable {
+    public var maneuver: FfiManeuver
+    public var modifier: FfiManeuverModifier
+    public var exitCount: UInt32?
+    public var name: String
+    public var roadRef: String
+    public var dest: String
+    public var destRef: String
+    public var exitRef: String
+    public var lat: Double
+    public var lon: Double
+    public var distFromLegStartM: Double
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(maneuver: FfiManeuver, modifier: FfiManeuverModifier, exitCount: UInt32?, name: String, roadRef: String, dest: String, destRef: String, exitRef: String, lat: Double, lon: Double, distFromLegStartM: Double) {
+        self.maneuver = maneuver
+        self.modifier = modifier
+        self.exitCount = exitCount
+        self.name = name
+        self.roadRef = roadRef
+        self.dest = dest
+        self.destRef = destRef
+        self.exitRef = exitRef
+        self.lat = lat
+        self.lon = lon
+        self.distFromLegStartM = distFromLegStartM
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiStep: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiStep: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiStep {
+        return
+            try FfiStep(
+                maneuver: FfiConverterTypeFfiManeuver.read(from: &buf), 
+                modifier: FfiConverterTypeFfiManeuverModifier.read(from: &buf), 
+                exitCount: FfiConverterOptionUInt32.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf), 
+                roadRef: FfiConverterString.read(from: &buf), 
+                dest: FfiConverterString.read(from: &buf), 
+                destRef: FfiConverterString.read(from: &buf), 
+                exitRef: FfiConverterString.read(from: &buf), 
+                lat: FfiConverterDouble.read(from: &buf), 
+                lon: FfiConverterDouble.read(from: &buf), 
+                distFromLegStartM: FfiConverterDouble.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiStep, into buf: inout [UInt8]) {
+        FfiConverterTypeFfiManeuver.write(value.maneuver, into: &buf)
+        FfiConverterTypeFfiManeuverModifier.write(value.modifier, into: &buf)
+        FfiConverterOptionUInt32.write(value.exitCount, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterString.write(value.roadRef, into: &buf)
+        FfiConverterString.write(value.dest, into: &buf)
+        FfiConverterString.write(value.destRef, into: &buf)
+        FfiConverterString.write(value.exitRef, into: &buf)
+        FfiConverterDouble.write(value.lat, into: &buf)
+        FfiConverterDouble.write(value.lon, into: &buf)
+        FfiConverterDouble.write(value.distFromLegStartM, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiStep_lift(_ buf: RustBuffer) throws -> FfiStep {
+    return try FfiConverterTypeFfiStep.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiStep_lower(_ value: FfiStep) -> RustBuffer {
+    return FfiConverterTypeFfiStep.lower(value)
+}
+
+
+/**
  * One Charging Stop.
  */
 public struct FfiStop: Equatable, Hashable {
@@ -1799,6 +1905,235 @@ public func FfiConverterTypeFfiWaypoint_lower(_ value: FfiWaypoint) -> RustBuffe
 
 
 /**
+ * Mirrors `guidance::ManeuverType` 1:1 (wayfinder #66).
+ */
+
+public enum FfiManeuver: Equatable, Hashable {
+    
+    case depart
+    case arrive
+    case turn
+    case `continue`
+    case offRamp
+    case onRamp
+    case fork
+    case endOfRoad
+    case roundabout
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FfiManeuver: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiManeuver: FfiConverterRustBuffer {
+    typealias SwiftType = FfiManeuver
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiManeuver {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .depart
+        
+        case 2: return .arrive
+        
+        case 3: return .turn
+        
+        case 4: return .`continue`
+        
+        case 5: return .offRamp
+        
+        case 6: return .onRamp
+        
+        case 7: return .fork
+        
+        case 8: return .endOfRoad
+        
+        case 9: return .roundabout
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiManeuver, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .depart:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .arrive:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .turn:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .`continue`:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .offRamp:
+            writeInt(&buf, Int32(5))
+        
+        
+        case .onRamp:
+            writeInt(&buf, Int32(6))
+        
+        
+        case .fork:
+            writeInt(&buf, Int32(7))
+        
+        
+        case .endOfRoad:
+            writeInt(&buf, Int32(8))
+        
+        
+        case .roundabout:
+            writeInt(&buf, Int32(9))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiManeuver_lift(_ buf: RustBuffer) throws -> FfiManeuver {
+    return try FfiConverterTypeFfiManeuver.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiManeuver_lower(_ value: FfiManeuver) -> RustBuffer {
+    return FfiConverterTypeFfiManeuver.lower(value)
+}
+
+
+
+/**
+ * Mirrors `guidance::ManeuverModifier` 1:1 (wayfinder #66).
+ */
+
+public enum FfiManeuverModifier: Equatable, Hashable {
+    
+    case straight
+    case slightLeft
+    case slightRight
+    case left
+    case right
+    case sharpLeft
+    case sharpRight
+    case uTurn
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FfiManeuverModifier: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiManeuverModifier: FfiConverterRustBuffer {
+    typealias SwiftType = FfiManeuverModifier
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiManeuverModifier {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .straight
+        
+        case 2: return .slightLeft
+        
+        case 3: return .slightRight
+        
+        case 4: return .left
+        
+        case 5: return .right
+        
+        case 6: return .sharpLeft
+        
+        case 7: return .sharpRight
+        
+        case 8: return .uTurn
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiManeuverModifier, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .straight:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .slightLeft:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .slightRight:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .left:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .right:
+            writeInt(&buf, Int32(5))
+        
+        
+        case .sharpLeft:
+            writeInt(&buf, Int32(6))
+        
+        
+        case .sharpRight:
+            writeInt(&buf, Int32(7))
+        
+        
+        case .uTurn:
+            writeInt(&buf, Int32(8))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiManeuverModifier_lift(_ buf: RustBuffer) throws -> FfiManeuverModifier {
+    return try FfiConverterTypeFfiManeuverModifier.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiManeuverModifier_lower(_ value: FfiManeuverModifier) -> RustBuffer {
+    return FfiConverterTypeFfiManeuverModifier.lower(value)
+}
+
+
+
+/**
  * Vehicle selection (ADR 0004 point 2 keeps the Vehicle Model in Rust; the
  * caller only picks a variant).
  */
@@ -1985,6 +2320,30 @@ public func FfiConverterTypePlannerError_lower(_ value: PlannerError) -> RustBuf
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionUInt32: FfiConverterRustBuffer {
+    typealias SwiftType = UInt32?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterUInt32.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterUInt32.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionDouble: FfiConverterRustBuffer {
     typealias SwiftType = Double?
 
@@ -2149,6 +2508,31 @@ fileprivate struct FfiConverterSequenceTypeFfiSocPoint: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeFfiSocPoint.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeFfiStep: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiStep]
+
+    public static func write(_ value: [FfiStep], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiStep.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiStep] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiStep]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFfiStep.read(from: &buf))
         }
         return seq
     }
