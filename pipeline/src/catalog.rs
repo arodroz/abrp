@@ -29,7 +29,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub const CATALOG_FORMAT: u32 = 1;
-pub const REGION_PACK_FORMAT: &str = "rpack-1.1";
+/// Region Pack format string. Kept in lockstep with `packs::FORMAT_MAJOR` and
+/// `packs::FORMAT_MINOR` (enforced by test). Note that a partial run which
+/// doesn't rebuild the region pack still stamps this string in the catalog,
+/// so it describes what this pipeline writes, not what was written before.
+pub const REGION_PACK_FORMAT: &str = "rpack-2.0";
 pub const CHARGER_PACK_FORMAT: &str = "cpack-1";
 pub const MAP_PACK_FORMAT: &str = "pmtiles-z14";
 
@@ -385,7 +389,7 @@ mod tests {
             "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
         );
         assert_eq!(catalog.artifacts["region_pack"].bytes, 11);
-        assert_eq!(catalog.formats.region_pack, "rpack-1.1");
+        assert_eq!(catalog.formats.region_pack, "rpack-2.0");
     }
 
     #[test]
@@ -523,6 +527,14 @@ mod tests {
         assert_ne!(
             after.artifacts["charger_pack"],
             before.artifacts["charger_pack"]
+        );
+    }
+
+    #[test]
+    fn region_pack_format_constant_tracks_packs_version() {
+        assert_eq!(
+            REGION_PACK_FORMAT,
+            format!("rpack-{}.{}", packs::FORMAT_MAJOR, packs::FORMAT_MINOR)
         );
     }
 }
