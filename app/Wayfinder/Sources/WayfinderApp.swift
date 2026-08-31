@@ -49,6 +49,13 @@ struct WayfinderApp: App {
         driveStore = DriveStore(planStore: store, tripStore: tripStore)
         Autotest.runIfRequested(store: store, installer: packInstaller, tripStore: tripStore, driveStore: driveStore)
         let installer = packInstaller
+        // wayfinder #55: an install of the active region must release the live Planner's
+        // mmapped .rpack before the installer's deep verify tries to mmap the staged
+        // replacement (and only then -- planning stays available through the download), then
+        // re-adopt whatever's on disk once the attempt ends: the new pack on success, the
+        // untouched old one on failure. One rule either way.
+        packInstaller.onDeepVerifyWillStart = { [weak store] region in store?.unloadForPackUpdate(region: region) }
+        packInstaller.onInstallDidEnd = { [weak store] region in store?.packsDidChange(region: region) }
         Task { await installer.checkForUpdates() }
     }
 

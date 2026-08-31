@@ -15,6 +15,7 @@
 import Foundation
 import PlannerKit
 import SwiftUI
+import UIKit
 
 struct SettingsForm: View {
     @Bindable var store: PlanStore
@@ -25,6 +26,8 @@ struct SettingsForm: View {
     @State private var pendingDeleteTripLogURL: URL?
     @State private var confirmingDeleteAllLogs = false
     @State private var confirmingClearRecents = false
+    /// R12: which row's failure alert is showing, if any -- set by tapping a failed row.
+    @State private var alertingRegionId: String?
 
     var body: some View {
         NavigationStack {
@@ -70,6 +73,12 @@ struct SettingsForm: View {
                         packRow(row)
                     }
                     Toggle("Allow cellular downloads", isOn: $installer.allowCellularDownloads)
+                    // R19: a row mid-install with cellular still off is the one case where
+                    // "nothing's happening" might actually mean "waiting on Wi-Fi", not a bug.
+                    if anyRowInstalling && !installer.allowCellularDownloads {
+                        Text("Large downloads pause until Wi-Fi is available.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                     if installer.lastIndexFetchFailed {
                         Text("Couldn't check for pack updates").font(.caption).foregroundStyle(.secondary)
                     }
@@ -330,46 +339,83 @@ struct SettingsForm: View {
         )
     }
 
-    // MARK: Packs section (wayfinder #47)
+    // MARK: Packs section (wayfinder #47, phase/error UX wayfinder #55)
 
     private var pendingDeleteRegionName: String {
         guard let id = pendingDeleteRegionId else { return "" }
         return installer.rows.first(where: { $0.id == id })?.name ?? id
     }
 
+    /// R19: whether any row currently has an install/update in flight.
+    private var anyRowInstalling: Bool {
+        installer.rows.contains { $0.phase != nil }
+    }
+
     @ViewBuilder
     private func packRow(_ row: PackInstaller.RegionRow) -> some View {
+        let failed = row.phase == nil && row.lastError != nil
         VStack(alignment: .leading, spacing: 4) {
             HStack {
                 VStack(alignment: .leading) {
                     Text(row.name)
-                    Text(packRowSubtitle(row)).font(.caption).foregroundStyle(.secondary)
+                    Text(packRowSubtitle(row)).font(.caption).foregroundStyle(failed ? .red : .secondary)
                 }
                 Spacer()
                 packRowButtons(row)
             }
-            if let fraction = row.downloadFraction {
-                ProgressView(value: fraction)
+            if row.phase != nil {
+                if let fraction = row.phaseFraction {
+                    ProgressView(value: fraction)
+                } else {
+                    ProgressView().progressViewStyle(.linear)
+                }
             }
+        }
+        // R12: a failed row is tappable for the full (never-truncated) failure message --
+        // tonight's #55 failure landed truncated in a footnote with no way to see the rest.
+        .contentShape(Rectangle())
+        .onTapGesture {
+            guard failed else { return }
+            alertingRegionId = row.id
+        }
+        .alert(
+            "Couldn't \(row.installedEpoch == nil ? "install" : "update") \(row.name)",
+            isPresented: Binding(
+                get: { alertingRegionId == row.id },
+                set: { if !$0 { alertingRegionId = nil } }
+            ),
+            presenting: row.lastError
+        ) { _ in
+            Button("Retry") { runInstall(row) }
+            Button("Copy") { UIPasteboard.general.string = row.lastError }
+            Button("OK", role: .cancel) {}
+        } message: { message in
+            Text(message)
         }
     }
 
     @ViewBuilder
     private func packRowButtons(_ row: PackInstaller.RegionRow) -> some View {
         HStack(spacing: 12) {
-            if row.downloadFraction == nil {
-                if row.installedEpoch == nil {
-                    Button("Install") { runInstall(row) }
+            if row.phase == nil {
+                // R5: an install/update in flight on ANY row disables every other row's
+                // buttons (still visible, just greyed) -- only one install runs at a time
+                // anyway (PackInstaller.alreadyInstalling), so a second tap can only confuse.
+                let anyRowBusy = installer.rows.contains { $0.phase != nil }
+                if row.lastError != nil {
+                    Button("Retry") { runInstall(row) }.disabled(anyRowBusy)
+                } else if row.installedEpoch == nil {
+                    Button("Install") { runInstall(row) }.disabled(anyRowBusy)
                 } else {
                     // M-01: a needs-repair region reuses the update-available path -- Install
                     // redownloads whatever's missing (the installer's per-artifact sha check
                     // already skips what's still there and valid).
                     if row.updateAvailable || row.needsRepair {
-                        Button(row.needsRepair ? "Repair" : "Update") { runInstall(row) }
+                        Button(row.needsRepair ? "Repair" : "Update") { runInstall(row) }.disabled(anyRowBusy)
                     }
                     Button("Use") { store.setActiveRegion(row.id) }
-                        .disabled(row.id == store.activeRegion)
-                    Button("Delete", role: .destructive) { pendingDeleteRegionId = row.id }
+                        .disabled(row.id == store.activeRegion || anyRowBusy)
+                    Button("Delete", role: .destructive) { pendingDeleteRegionId = row.id }.disabled(anyRowBusy)
                 }
             }
         }
@@ -377,32 +423,52 @@ struct SettingsForm: View {
     }
 
     /// M-03: failures are no longer swallowed with `try?` -- `installer.install` already
-    /// records them into `lastOperationError`, rendered as the footnote row above.
+    /// records them into `row.lastError` (wayfinder #55), rendered by `packRow`'s subtitle and
+    /// failure alert above. Adoption (wayfinder #55) is wired through
+    /// `PackInstaller.onInstallWillStart`/`onInstallDidEnd` in WayfinderApp.swift, not here.
     private func runInstall(_ row: PackInstaller.RegionRow) {
         Task {
-            do {
-                try await installer.install(region: row.id)
-                // Adoption (wayfinder #55): a successful install/update that landed on the
-                // active region must reload the planner, or it keeps running on the old .rpack.
-                store.packsDidChange(region: row.id)
-            } catch {}
+            do { try await installer.install(region: row.id) } catch {}
         }
     }
 
     private func packRowSubtitle(_ row: PackInstaller.RegionRow) -> String {
-        let sizeSuffix = row.totalBytes.map { " \u{00B7} \(Self.byteCountFormatter.string(fromByteCount: $0))" } ?? ""
-        if let fraction = row.downloadFraction {
-            return "Downloading \(Int(fraction * 100))%"
+        let sizeText = row.totalBytes.map { Self.byteCountFormatter.string(fromByteCount: $0) }
+
+        switch row.phase {
+        case .checking:
+            return "Checking existing files\u{2026}"
+        case .downloading(let artifact):
+            guard let fraction = row.phaseFraction else { return "Downloading \(artifact)\u{2026}" }
+            let pct = Int(fraction * 100)
+            // The byte figure is the transferring artifact's own total (didWriteData), never
+            // the region total -- "47% of 4.6 GB" must be 47% of the file actually moving.
+            guard let artifactBytes = row.phaseTotalBytes else { return "Downloading \(artifact)\u{2026} \(pct)%" }
+            return "Downloading \(artifact)\u{2026} \(pct)% of \(Self.byteCountFormatter.string(fromByteCount: artifactBytes))"
+        case .verifying(let artifact):
+            guard let fraction = row.phaseFraction else { return "Verifying \(artifact)\u{2026}" }
+            return "Verifying \(artifact)\u{2026} \(Int(fraction * 100))%"
+        case .finishing:
+            return "Finishing\u{2026}"
+        case nil:
+            break
         }
+
+        if row.lastError != nil {
+            let verb = row.installedEpoch == nil ? "install" : "update"
+            return "Couldn't \(verb) \u{2014} tap for details"
+        }
+
+        let sizeSuffix = sizeText.map { " \u{00B7} \($0)" } ?? ""
         guard let installedEpoch = row.installedEpoch else {
             return "Not installed" + sizeSuffix
         }
-        let dateText = Self.epochDateFormatter.string(from: Date(timeIntervalSince1970: TimeInterval(installedEpoch)))
         if row.needsRepair {
-            return "Needs repair (installed \(dateText))"
+            return "Missing files \u{00B7} repair to fix"
         }
+        let dateText = Self.epochDateFormatter.string(from: Date(timeIntervalSince1970: TimeInterval(installedEpoch)))
         if row.updateAvailable {
-            return "Update available (installed \(dateText))"
+            return "Update available \u{00B7} installed \(dateText)"
         }
         return "Installed \(dateText)" + sizeSuffix
     }

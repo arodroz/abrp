@@ -748,6 +748,17 @@ enum Autotest {
         do {
             try await installer.install(region: "lu-dev")
             report("install-lu-dev", true)
+
+            // wayfinder #55: install()'s defer clears phase, and a clean success clears
+            // lastError -- the row must land quiescent, not stuck mid-phase or carrying a
+            // stale failure message.
+            let luDevRow = installer.rows.first { $0.id == "lu-dev" }
+            let quiescentOk = luDevRow?.phase == nil && luDevRow?.lastError == nil
+            report(
+                "install-ends-quiescent", quiescentOk,
+                "phase=\(String(describing: luDevRow?.phase)) lastError=\(String(describing: luDevRow?.lastError))"
+            )
+            ok = ok && quiescentOk
         } catch {
             report("install-lu-dev", false, "\(error)")
             await finish(ok: false)
@@ -842,9 +853,9 @@ enum Autotest {
         report("adopt-inactive-noop", inactiveNoopOk, "chargerCount=\(store.chargerCount)")
         ok = ok && inactiveNoopOk
 
-        // The active region -- `resetRouteStateAndReload` runs synchronously on the main actor
-        // before `packsDidChange` returns, so the reset is observable immediately; the reload it
-        // kicks off lands asynchronously.
+        // The active region -- `resetRouteState()` runs synchronously on the main actor before
+        // `packsDidChange` returns, so the reset is observable immediately; the `load()` it
+        // kicks off afterward lands asynchronously.
         store.packsDidChange(region: "lu-dev")
         let resetRanSynchronously = store.chargerCount == 0
         let reloadedAfterAdoption = await waitWithTimeout(seconds: 15) {

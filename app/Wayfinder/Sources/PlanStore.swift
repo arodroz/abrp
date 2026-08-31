@@ -234,10 +234,14 @@ final class PlanStore: NSObject, @preconcurrency MLNMapViewDelegate, @preconcurr
         activeRegion = region
         UserDefaults.standard.set(region, forKey: Self.activeRegionKey)
 
-        resetRouteStateAndReload()
+        resetRouteState()
+        load()
     }
 
-    private func resetRouteStateAndReload() {
+    /// Everything `setActiveRegion`/`packsDidChange` need to clear before their own `load()`
+    /// call -- factored out (wayfinder #55) so `unloadForPackUpdate` can run just the clearing
+    /// half, without the reload, while an install is staging a replacement pack.
+    private func resetRouteState() {
         destination = nil
         waypoints = []
         plan = nil
@@ -253,8 +257,6 @@ final class PlanStore: NSObject, @preconcurrency MLNMapViewDelegate, @preconcurr
         chargerCount = 0
         plannerStatus = .idle
         packStatus = .missing
-
-        load()
     }
 
     /// Adoption for in-place pack changes (wayfinder #55): an install/update that landed on the
@@ -263,7 +265,20 @@ final class PlanStore: NSObject, @preconcurrency MLNMapViewDelegate, @preconcurr
     /// other region is a no-op (its files are picked up when it becomes active).
     func packsDidChange(region: String) {
         guard region == activeRegion else { return }
-        resetRouteStateAndReload()
+        resetRouteState()
+        load()
+    }
+
+    /// Wired to PackInstaller's `onDeepVerifyWillStart` (WayfinderApp.swift): releasing
+    /// `client` drops the Rust Planner and unmaps the old multi-GB .rpack so the installer's
+    /// deep verify has address space to mmap the staged pack (wayfinder #55: verify failed to
+    /// open a byte-perfect staged 4.6 GB pack while the old pack + map tiles were mapped).
+    /// Deliberately does NOT call `load()` -- `onInstallDidEnd` re-adopts via `packsDidChange`
+    /// once the install finishes, on both success (the new pack) and failure (the untouched
+    /// old pack, reread from disk): one rule, either way.
+    func unloadForPackUpdate(region: String) {
+        guard region == activeRegion else { return }
+        resetRouteState()
     }
 
     func load() {
