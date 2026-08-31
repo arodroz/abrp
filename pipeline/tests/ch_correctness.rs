@@ -53,7 +53,8 @@ fn edge(
         ascent_m,
         descent_m,
         road_class,
-        _pad: [0; 3],
+        guide_flags: 0,
+        _pad: [0; 2],
         ch_middle_node: CH_MIDDLE_NODE_NONE,
         geom_offset: 0,
         geom_count: 0,
@@ -172,6 +173,7 @@ fn build_graph(seed: u64, spec: &GraphSpec) -> RegionGraphModel {
         ch_order: vec![0; n_nodes],
         geometry: Vec::new(),
         snap_grid: trivial_snap_grid(n_nodes),
+        ..Default::default()
     }
 }
 
@@ -403,6 +405,7 @@ fn five_node_line_graph_hand_checked() {
         ch_order: vec![0; n_nodes],
         geometry: Vec::new(),
         snap_grid: trivial_snap_grid(n_nodes),
+        ..Default::default()
     };
 
     let (contracted, _stats) = ch_prepare(&base);
@@ -466,6 +469,7 @@ fn four_node_diamond_hand_checked() {
         ch_order: vec![0; n_nodes],
         geometry: Vec::new(),
         snap_grid: trivial_snap_grid(n_nodes),
+        ..Default::default()
     };
 
     let (contracted, _stats) = ch_prepare(&base);
@@ -476,4 +480,136 @@ fn four_node_diamond_hand_checked() {
     let route = router.p2p(0, 3).expect("0 -> 3 is connected");
     assert_costs_close(route.cost_seconds, 72.0, "4-node diamond 0->3");
     assert_eq!(route.nodes, vec![0, 1, 3]);
+}
+
+// --- Format 2.0 guidance CH remap (wayfinder #65) -----------------------
+
+/// The node owning CSR slot `slot`: the last row whose start is `<= slot`.
+fn owning_node(csr: &[u32], slot: usize) -> u32 {
+    (csr.partition_point(|&start| (start as usize) <= slot) - 1) as u32
+}
+
+fn resolve_string(model: &RegionGraphModel, id: u32) -> String {
+    let start = model.string_offsets[id as usize] as usize;
+    let end = model.string_offsets[id as usize + 1] as usize;
+    String::from_utf8(model.string_blob[start..end].to_vec()).unwrap()
+}
+
+/// CH contraction must remap guidance by edge *identity* (the physical
+/// from/to/length triple), not by slot: contraction interleaves shortcuts
+/// among the originals and reorders everything by final `from`. Gives every
+/// base edge a distinct name ("e0", "e1", ...) plus one dest sign, contracts,
+/// and checks that every surviving original edge's name followed it to its
+/// new slot, every shortcut is GUIDE_NONE, and the dest sign landed on the
+/// final slot of the same physical edge.
+#[test]
+fn ch_prepare_remaps_guidance_by_edge_identity_not_slot() {
+    // No long-range links: a plain grid's edges have a unique (from, to)
+    // per direction, so (from, to, length_m) is guaranteed unique -- a
+    // random long-range link could otherwise coincidentally duplicate a
+    // grid edge's identity and make the by-identity check ambiguous.
+    let spec = GraphSpec {
+        n_rows: 6,
+        n_cols: 6,
+        n_long_range: 0,
+        n_island: 0,
+    };
+    let mut base = build_graph(0xC0DE, &spec);
+    let n_edges = base.edges.len();
+
+    // Strings: "" (id 0), "e0".."e{n-1}" (ids 1..=n, one per base edge, so
+    // string id == edge index + 1), then "DestX" (id n+1).
+    let mut strings: Vec<String> = vec![String::new()];
+    for i in 0..n_edges {
+        strings.push(format!("e{i}"));
+    }
+    strings.push("DestX".to_string());
+    let mut string_offsets = vec![0u32];
+    let mut string_blob = Vec::new();
+    for s in &strings {
+        string_blob.extend_from_slice(s.as_bytes());
+        string_offsets.push(string_blob.len() as u32);
+    }
+    let dest_string_id = n_edges as u32 + 1;
+
+    // edge_attrs[0] = {0,0} (unused here); edge_attrs[i+1] names edge i.
+    let mut edge_attrs = vec![packs::EdgeAttr {
+        name_id: 0,
+        ref_id: 0,
+    }];
+    for i in 0..n_edges {
+        edge_attrs.push(packs::EdgeAttr {
+            name_id: i as u32 + 1,
+            ref_id: 0,
+        });
+    }
+    let edge_guide: Vec<u32> = (0..n_edges as u32).map(|i| i + 1).collect();
+    let dest_signs = vec![packs::DestSign {
+        edge_slot: 0,
+        dest_id: dest_string_id,
+        dest_ref_id: 0,
+        junction_ref_id: 0,
+    }];
+
+    base.string_offsets = string_offsets;
+    base.string_blob = string_blob;
+    base.edge_attrs = edge_attrs;
+    base.edge_guide = edge_guide;
+    base.dest_signs = dest_signs;
+    base.validate().expect("guidance-augmented base model should validate");
+
+    // Physical identity (from, to, length_bits) -> the name this base edge
+    // carries, and which base slot carried the dest sign.
+    let mut expected_name: std::collections::HashMap<(u32, u32, u32), String> =
+        std::collections::HashMap::new();
+    for (slot, e) in base.edges.iter().enumerate() {
+        let from = owning_node(&base.csr_first_edge, slot);
+        expected_name.insert((from, e.target, e.length_m.to_bits()), format!("e{slot}"));
+    }
+    let dest_edge = &base.edges[0];
+    let dest_from = owning_node(&base.csr_first_edge, 0);
+    let dest_identity = (dest_from, dest_edge.target, dest_edge.length_m.to_bits());
+
+    let (contracted, _stats) = ch_prepare(&base);
+
+    let mut dest_sign_checked = false;
+    for (slot, e) in contracted.edges.iter().enumerate() {
+        let guide = contracted.edge_guide[slot];
+        if e.ch_middle_node != CH_MIDDLE_NODE_NONE {
+            assert_eq!(guide, packs::GUIDE_NONE, "shortcut at slot {slot} should be GUIDE_NONE");
+            continue;
+        }
+        let from = owning_node(&contracted.csr_first_edge, slot);
+        let identity = (from, e.target, e.length_m.to_bits());
+        let attr = contracted.edge_attrs[guide as usize];
+        let name = resolve_string(&contracted, attr.name_id);
+        let expected = expected_name.get(&identity).unwrap_or_else(|| {
+            panic!("final slot {slot} (from {from} -> {}) has no matching base edge identity -- CH must never alter an original edge's (from, to, length_m)", e.target)
+        });
+        assert_eq!(
+            &name, expected,
+            "final slot {slot} (from {from} -> {}) carries the wrong guidance name",
+            e.target
+        );
+        if identity == dest_identity {
+            let sign = contracted
+                .dest_signs
+                .iter()
+                .find(|s| s.edge_slot == slot as u32)
+                .unwrap_or_else(|| {
+                    panic!("dest sign should have followed the edge to final slot {slot}")
+                });
+            assert_eq!(resolve_string(&contracted, sign.dest_id), "DestX");
+            dest_sign_checked = true;
+        }
+    }
+    assert!(
+        dest_sign_checked,
+        "the dest-signed base edge should still exist as an original edge post-contraction"
+    );
+    assert_eq!(contracted.dest_signs.len(), 1);
+
+    let (pack, _dir) = write_and_open(&contracted, "guidance-remap");
+    pack.verify_structure()
+        .expect("contracted model with remapped guidance should pass verify_structure");
 }

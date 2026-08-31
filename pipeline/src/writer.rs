@@ -9,10 +9,12 @@ use std::mem::size_of;
 use std::path::Path;
 
 use packs::{
-    alignment_padding, EdgeHot, GeomVertex, HeaderFixed, NodeRecord, RegionGraphModel, RpackError,
-    SectionEntry, SnapGridHeader, REGION_NAME_LEN, SECTION_CH_ORDER, SECTION_CSR,
-    SECTION_EDGES_HOT, SECTION_GEOMETRY, SECTION_NODES, SECTION_REVERSE_CSR, SECTION_REVERSE_EDGES,
-    SECTION_SNAP_GRID,
+    alignment_padding, DestSign, EdgeAttr, EdgeHot, ExitRef, GeomVertex, HeaderFixed, NodeRecord,
+    RegionGraphModel, RpackError, SectionEntry, SnapGridHeader, CH_MIDDLE_NODE_NONE, GUIDE_NONE,
+    REGION_NAME_LEN, SECTION_CH_ORDER, SECTION_CSR, SECTION_DEST_SIGNS, SECTION_EDGES_HOT,
+    SECTION_EDGE_ATTRS, SECTION_EDGE_GUIDE, SECTION_EXIT_REFS, SECTION_GEOMETRY, SECTION_NODES,
+    SECTION_REVERSE_CSR, SECTION_REVERSE_EDGES, SECTION_SNAP_GRID, SECTION_STRING_BLOB,
+    SECTION_STRING_OFFSETS,
 };
 
 /// Derives the baked reverse-adjacency CSR (format 1.1, ADR 0007): for each
@@ -36,6 +38,62 @@ fn build_reverse_index(n_nodes: usize, edges: &[EdgeHot]) -> (Vec<u32>, Vec<u32>
         *slot += 1;
     }
     (reverse_csr, reverse_edges)
+}
+
+/// The six format 2.0 guidance arrays (wayfinder #65), ready to write as-is.
+struct GuidanceArrays {
+    string_offsets: Vec<u32>,
+    string_blob: Vec<u8>,
+    edge_attrs: Vec<EdgeAttr>,
+    edge_guide: Vec<u32>,
+    dest_signs: Vec<DestSign>,
+    exit_refs: Vec<ExitRef>,
+}
+
+/// Synthesizes the minimal valid v2 guidance when `model` carries none, so
+/// every existing producer (slice_import, synthetic test models) keeps
+/// writing valid v2 packs with no call-site changes. Per `validate()`'s
+/// invariant, an original edge's guide can't be GUIDE_NONE, so originals
+/// point at attr 0 (unnamed) and only shortcuts get GUIDE_NONE.
+fn guidance_arrays(model: &RegionGraphModel) -> GuidanceArrays {
+    let guidance_empty = model.string_offsets.is_empty()
+        && model.string_blob.is_empty()
+        && model.edge_attrs.is_empty()
+        && model.edge_guide.is_empty()
+        && model.dest_signs.is_empty()
+        && model.exit_refs.is_empty();
+    if !guidance_empty {
+        return GuidanceArrays {
+            string_offsets: model.string_offsets.clone(),
+            string_blob: model.string_blob.clone(),
+            edge_attrs: model.edge_attrs.clone(),
+            edge_guide: model.edge_guide.clone(),
+            dest_signs: model.dest_signs.clone(),
+            exit_refs: model.exit_refs.clone(),
+        };
+    }
+    let edge_guide = model
+        .edges
+        .iter()
+        .map(|e| {
+            if e.ch_middle_node == CH_MIDDLE_NODE_NONE {
+                0
+            } else {
+                GUIDE_NONE
+            }
+        })
+        .collect();
+    GuidanceArrays {
+        string_offsets: vec![0, 0],
+        string_blob: Vec::new(),
+        edge_attrs: vec![EdgeAttr {
+            name_id: 0,
+            ref_id: 0,
+        }],
+        edge_guide,
+        dest_signs: Vec::new(),
+        exit_refs: Vec::new(),
+    }
 }
 
 /// Pack-level metadata that isn't part of the graph model itself.
@@ -96,7 +154,13 @@ pub fn write_rpack(
         });
     }
 
-    const SECTION_COUNT: usize = 8;
+    let guidance = guidance_arrays(model);
+
+    // IMPORTANT ORDERING CONSTRAINT: the six guidance sections must come
+    // after every v1 section (SECTION_COUNT was 8 before format 2.0) so a
+    // test can truncate the section table to the first 8 entries and patch
+    // the header down to format 1.1, yielding a byte-valid v1 file.
+    const SECTION_COUNT: usize = 14;
     let header_size = size_of::<HeaderFixed>() as u64;
     let table_len = SECTION_COUNT as u64 * size_of::<SectionEntry>() as u64;
 
@@ -205,6 +269,7 @@ pub fn write_rpack(
         writer.write_all(node_ids_bytes)?;
         let len_bytes =
             (header_bytes.len() + cell_offsets_bytes.len() + node_ids_bytes.len()) as u64;
+        pos += len_bytes;
 
         let mut hasher = crc32fast::Hasher::new();
         hasher.update(header_bytes);
@@ -220,6 +285,46 @@ pub fn write_rpack(
             _pad2: 0,
         });
     }
+
+    // Format 2.0 guidance sections (wayfinder #65). Must come after every
+    // v1 section (see the ordering comment above SECTION_COUNT) and in id
+    // order.
+    entries.push(write_section(
+        &mut writer,
+        &mut pos,
+        SECTION_STRING_OFFSETS,
+        bytemuck::cast_slice::<u32, u8>(&guidance.string_offsets),
+    )?);
+    entries.push(write_section(
+        &mut writer,
+        &mut pos,
+        SECTION_STRING_BLOB,
+        &guidance.string_blob,
+    )?);
+    entries.push(write_section(
+        &mut writer,
+        &mut pos,
+        SECTION_EDGE_ATTRS,
+        bytemuck::cast_slice::<EdgeAttr, u8>(&guidance.edge_attrs),
+    )?);
+    entries.push(write_section(
+        &mut writer,
+        &mut pos,
+        SECTION_EDGE_GUIDE,
+        bytemuck::cast_slice::<u32, u8>(&guidance.edge_guide),
+    )?);
+    entries.push(write_section(
+        &mut writer,
+        &mut pos,
+        SECTION_DEST_SIGNS,
+        bytemuck::cast_slice::<DestSign, u8>(&guidance.dest_signs),
+    )?);
+    entries.push(write_section(
+        &mut writer,
+        &mut pos,
+        SECTION_EXIT_REFS,
+        bytemuck::cast_slice::<ExitRef, u8>(&guidance.exit_refs),
+    )?);
 
     let mut region_name = [0u8; REGION_NAME_LEN];
     region_name[..name_bytes.len()].copy_from_slice(name_bytes);

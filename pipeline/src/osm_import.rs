@@ -16,7 +16,10 @@ use std::process::Command;
 
 use osmpbf::{BlobDecode, BlobReader, Element, ElementReader};
 use packs::{
-    EdgeHot, GeomVertex, NodeRecord, RegionGraphModel, SnapGridModel, CH_MIDDLE_NODE_NONE,
+    DestSign, EdgeAttr, EdgeHot, ExitRef, GeomVertex, NodeRecord, RegionGraphModel, SnapGridModel,
+    CH_MIDDLE_NODE_NONE, GUIDE_CLASS_LIVING_STREET, GUIDE_CLASS_MOTORWAY, GUIDE_CLASS_NONE,
+    GUIDE_CLASS_PRIMARY, GUIDE_CLASS_RESIDENTIAL, GUIDE_CLASS_SECONDARY, GUIDE_CLASS_TERTIARY,
+    GUIDE_CLASS_TRUNK, GUIDE_CLASS_UNCLASSIFIED, GUIDE_FLAG_LINK, GUIDE_FLAG_ROUNDABOUT,
 };
 
 /// Snap grid cell size, matching `slice_import::SNAP_CELL_SIZE_DEG`.
@@ -69,6 +72,43 @@ fn road_class_for(highway: &str) -> u8 {
     }
 }
 
+/// Highway class -> `GUIDE_CLASS_*` (wayfinder #65). `_link` variants are
+/// stripped by the caller before this lookup; anything not in the drivable
+/// table (already filtered out by `class_default_speed` before a way's
+/// guidance is computed) maps to `GUIDE_CLASS_NONE`.
+fn guide_class_for(base_highway: &str) -> u8 {
+    match base_highway {
+        "motorway" => GUIDE_CLASS_MOTORWAY,
+        "trunk" => GUIDE_CLASS_TRUNK,
+        "primary" => GUIDE_CLASS_PRIMARY,
+        "secondary" => GUIDE_CLASS_SECONDARY,
+        "tertiary" => GUIDE_CLASS_TERTIARY,
+        "unclassified" => GUIDE_CLASS_UNCLASSIFIED,
+        "residential" => GUIDE_CLASS_RESIDENTIAL,
+        "living_street" => GUIDE_CLASS_LIVING_STREET,
+        _ => GUIDE_CLASS_NONE,
+    }
+}
+
+/// Turn-by-turn guidance flags (wayfinder #65) for a way: highway class in
+/// bits 0-3, `_link` in bit 4, roundabout in bit 5. Deliberately independent
+/// of `oneway_dir` -- `junction=circular` sets the roundabout bit here but,
+/// unlike `junction=roundabout`, does not imply oneway.
+fn guide_flags_for(highway: &str, tags: &HashMap<&str, &str>) -> u8 {
+    let (base, is_link) = match highway.strip_suffix("_link") {
+        Some(b) => (b, true),
+        None => (highway, false),
+    };
+    let mut flags = guide_class_for(base);
+    if is_link {
+        flags |= GUIDE_FLAG_LINK;
+    }
+    if matches!(tags.get("junction").copied(), Some("roundabout" | "circular")) {
+        flags |= GUIDE_FLAG_ROUNDABOUT;
+    }
+    flags
+}
+
 fn parse_maxspeed(v: &str) -> Option<f64> {
     let lower = v.to_ascii_lowercase();
     if lower.contains("mph") {
@@ -93,11 +133,109 @@ fn oneway_dir(tags: &HashMap<&str, &str>) -> i8 {
     0
 }
 
+/// Interns strings into a contiguous table (wayfinder #65): id 0 is always
+/// the empty string, matching `SECTION_STRING_OFFSETS`/`SECTION_STRING_BLOB`'s
+/// on-disk contract. `finish` produces the two arrays the model/writer want
+/// directly, so callers never build the offsets by hand.
+struct StringInterner {
+    strings: Vec<String>,
+    index: HashMap<String, u32>,
+}
+
+impl StringInterner {
+    fn new() -> Self {
+        StringInterner {
+            strings: vec![String::new()],
+            index: HashMap::from([(String::new(), 0)]),
+        }
+    }
+
+    fn intern(&mut self, s: &str) -> u32 {
+        if let Some(&id) = self.index.get(s) {
+            return id;
+        }
+        let id = self.strings.len() as u32;
+        self.strings.push(s.to_string());
+        self.index.insert(s.to_string(), id);
+        id
+    }
+
+    fn finish(self) -> (Vec<u32>, Vec<u8>) {
+        let mut offsets = Vec::with_capacity(self.strings.len() + 1);
+        let mut blob = Vec::new();
+        offsets.push(0u32);
+        for s in &self.strings {
+            blob.extend_from_slice(s.as_bytes());
+            offsets.push(blob.len() as u32);
+        }
+        (offsets, blob)
+    }
+}
+
+impl Default for StringInterner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Interns unique (name_id, ref_id) pairs (wayfinder #65): entry 0 is always
+/// `{0, 0}` (unnamed), matching `SECTION_EDGE_ATTRS`'s on-disk contract.
+struct AttrInterner {
+    attrs: Vec<EdgeAttr>,
+    index: HashMap<(u32, u32), u32>,
+}
+
+impl AttrInterner {
+    fn new() -> Self {
+        AttrInterner {
+            attrs: vec![EdgeAttr {
+                name_id: 0,
+                ref_id: 0,
+            }],
+            index: HashMap::from([((0, 0), 0)]),
+        }
+    }
+
+    fn intern(&mut self, name_id: u32, ref_id: u32) -> u32 {
+        if let Some(&id) = self.index.get(&(name_id, ref_id)) {
+            return id;
+        }
+        let id = self.attrs.len() as u32;
+        self.attrs.push(EdgeAttr { name_id, ref_id });
+        self.index.insert((name_id, ref_id), id);
+        id
+    }
+}
+
+impl Default for AttrInterner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 struct WayRec {
     refs: Vec<i64>,
     oneway: i8,
     speed_kmh: f64,
     road_class: u8,
+    attr_idx: u32,
+    guide_flags: u8,
+    dest_id: u32,
+    dest_ref_id: u32,
+    junction_ref_id: u32,
+}
+
+/// Destination signage describes a way's forward direction only (wayfinder
+/// #65: `destination:backward` is deferred), so it's attached only to an
+/// edge built in way-forward orientation -- the `oneway == 1` edge and the
+/// forward edge of a two-way. The `oneway == -1` edge and the reverse edge
+/// of a two-way get zeros (meaning "not present").
+fn dest_ids_for_direction(way: &WayRec, forward: bool) -> (u32, u32, u32) {
+    if forward {
+        (way.dest_id, way.dest_ref_id, way.junction_ref_id)
+    } else {
+        (0, 0, 0)
+    }
 }
 
 /// Accumulates drivable ways across one or more PBF files. Deduped by way
@@ -111,6 +249,8 @@ struct WayAccumulator {
     endpoints: HashSet<i64>,
     needed_nodes: HashSet<i64>,
     seen_way_ids: HashSet<i64>,
+    strings: StringInterner,
+    attrs: AttrInterner,
 }
 
 impl WayAccumulator {
@@ -138,6 +278,27 @@ impl WayAccumulator {
             .unwrap_or(default_speed);
         let oneway = oneway_dir(tags);
         let road_class = road_class_for(highway);
+        let guide_flags = guide_flags_for(highway, tags);
+
+        let name_id = self.strings.intern(tags.get("name").copied().unwrap_or(""));
+        // `ref` may carry a semicolon-separated list (e.g. "A1;E25"); kept
+        // as-is and interned as one string -- splitting is a maneuver-time
+        // concern, not this ticket's.
+        let ref_id = self.strings.intern(tags.get("ref").copied().unwrap_or(""));
+        let attr_idx = self.attrs.intern(name_id, ref_id);
+
+        let dest_id = tags
+            .get("destination")
+            .map(|v| self.strings.intern(v))
+            .unwrap_or(0);
+        let dest_ref_id = tags
+            .get("destination:ref")
+            .map(|v| self.strings.intern(v))
+            .unwrap_or(0);
+        let junction_ref_id = tags
+            .get("junction:ref")
+            .map(|v| self.strings.intern(v))
+            .unwrap_or(0);
 
         for &n in &refs {
             *self.node_way_count.entry(n).or_insert(0) += 1;
@@ -150,13 +311,20 @@ impl WayAccumulator {
             oneway,
             speed_kmh,
             road_class,
+            attr_idx,
+            guide_flags,
+            dest_id,
+            dest_ref_id,
+            junction_ref_id,
         });
         true
     }
 }
 
 /// One directed edge produced by chain collapse, before the SCC prune and
-/// CSR sort renumber `from`/`to`.
+/// CSR sort renumber `from`/`to`. `attr_idx`/`guide_flags` carry over from
+/// the way regardless of direction; `dest_id`/`dest_ref_id`/`junction_ref_id`
+/// only describe the way's forward direction (see `import_pbfs`).
 struct BuiltEdge {
     from: u32,
     to: u32,
@@ -164,6 +332,11 @@ struct BuiltEdge {
     speed_kmh: f32,
     road_class: u8,
     geom: Vec<GeomVertex>,
+    attr_idx: u32,
+    guide_flags: u8,
+    dest_id: u32,
+    dest_ref_id: u32,
+    junction_ref_id: u32,
 }
 
 /// Counts and per-file details surfaced from an `import_pbfs` run.
@@ -173,6 +346,10 @@ pub struct OsmImportStats {
     pub edges: usize,
     pub dropped_scc_nodes: usize,
     pub file_epochs: Vec<(PathBuf, Option<u64>)>,
+    /// Original edges whose interned name is non-empty (wayfinder #65).
+    pub named_edges: usize,
+    pub dest_sign_edges: usize,
+    pub exit_ref_nodes: usize,
 }
 
 /// Reads `paths` (e.g. one or more Geofabrik `.osm.pbf` extracts) into an
@@ -197,16 +374,33 @@ pub fn import_pbfs(
     }
     println!("[osm_import] drivable ways: {}", acc.ways.len());
 
-    // ---- Pass B (all files): node coordinates for nodes referenced by drivable ways ----
+    // ---- Pass B (all files): node coordinates for nodes referenced by drivable ways, plus
+    // motorway_junction exit refs (wayfinder #65) ----
     let mut coords: HashMap<i64, (f32, f32)> = HashMap::with_capacity(acc.needed_nodes.len());
+    // Raw (un-interned) ref strings, keyed by osm node id -- interned lazily
+    // below, only for the junction nodes that actually survive the SCC
+    // prune.
+    let mut exit_ref_tags: HashMap<i64, String> = HashMap::new();
     for path in paths {
         let reader = ElementReader::from_path(path)?;
         reader.for_each(|el| match el {
             Element::Node(n) if acc.needed_nodes.contains(&n.id()) => {
                 coords.insert(n.id(), (n.lat() as f32, n.lon() as f32));
+                let tags: HashMap<&str, &str> = n.tags().collect();
+                if tags.get("highway") == Some(&"motorway_junction") {
+                    if let Some(&r) = tags.get("ref") {
+                        exit_ref_tags.insert(n.id(), r.to_string());
+                    }
+                }
             }
             Element::DenseNode(n) if acc.needed_nodes.contains(&n.id()) => {
                 coords.insert(n.id(), (n.lat() as f32, n.lon() as f32));
+                let tags: HashMap<&str, &str> = n.tags().collect();
+                if tags.get("highway") == Some(&"motorway_junction") {
+                    if let Some(&r) = tags.get("ref") {
+                        exit_ref_tags.insert(n.id(), r.to_string());
+                    }
+                }
             }
             _ => {}
         })?;
@@ -274,7 +468,8 @@ pub fn import_pbfs(
             }
             let speed_kmh = way.speed_kmh as f32;
             let length_m = length_m as f32;
-            let mut push_edge = |from: u32, to: u32, geom: Vec<GeomVertex>| {
+            let mut push_edge = |from: u32, to: u32, geom: Vec<GeomVertex>, forward: bool| {
+                let (dest_id, dest_ref_id, junction_ref_id) = dest_ids_for_direction(way, forward);
                 built_edges.push(BuiltEdge {
                     from,
                     to,
@@ -282,18 +477,23 @@ pub fn import_pbfs(
                     speed_kmh,
                     road_class: way.road_class,
                     geom,
+                    attr_idx: way.attr_idx,
+                    guide_flags: way.guide_flags,
+                    dest_id,
+                    dest_ref_id,
+                    junction_ref_id,
                 });
             };
             match way.oneway {
-                1 => push_edge(from, to, to_geom(&chain_coords)),
+                1 => push_edge(from, to, to_geom(&chain_coords), true),
                 -1 => {
                     let rev: Vec<(f32, f32)> = chain_coords.iter().rev().copied().collect();
-                    push_edge(to, from, to_geom(&rev));
+                    push_edge(to, from, to_geom(&rev), false);
                 }
                 _ => {
-                    push_edge(from, to, to_geom(&chain_coords));
+                    push_edge(from, to, to_geom(&chain_coords), true);
                     let rev: Vec<(f32, f32)> = chain_coords.iter().rev().copied().collect();
-                    push_edge(to, from, to_geom(&rev));
+                    push_edge(to, from, to_geom(&rev), false);
                 }
             }
         }
@@ -413,7 +613,8 @@ pub fn import_pbfs(
                 ascent_m: 0.0,
                 descent_m: 0.0,
                 road_class: e.road_class,
-                _pad: [0; 3],
+                guide_flags: e.guide_flags,
+                _pad: [0; 2],
                 ch_middle_node: CH_MIDDLE_NODE_NONE,
                 geom_offset,
                 geom_count: e.geom.len() as u32,
@@ -421,6 +622,49 @@ pub fn import_pbfs(
         })
         .collect();
     let n_edges = edges.len();
+
+    // Format 2.0 guidance (wayfinder #65). `kept_edges` is all-original at
+    // this point (CH hasn't run), so `edge_guide` is just each edge's
+    // `attr_idx` in edge-slot order -- never GUIDE_NONE here.
+    let edge_guide: Vec<u32> = kept_edges.iter().map(|e| e.attr_idx).collect();
+    let named_edges = kept_edges
+        .iter()
+        .filter(|e| acc.attrs.attrs[e.attr_idx as usize].name_id != 0)
+        .count();
+    let dest_signs: Vec<DestSign> = kept_edges
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| e.dest_id != 0 || e.dest_ref_id != 0 || e.junction_ref_id != 0)
+        .map(|(edge_slot, e)| DestSign {
+            edge_slot: edge_slot as u32,
+            dest_id: e.dest_id,
+            dest_ref_id: e.dest_ref_id,
+            junction_ref_id: e.junction_ref_id,
+        })
+        .collect();
+    let dest_sign_edges = dest_signs.len();
+
+    // Exit refs (wayfinder #65): walk `junction_ids` in its existing
+    // ascending-osm-id order, skipping SCC-dropped nodes -- `remap` assigns
+    // final node ids in that same relative order, so this comes out sorted
+    // by final node_id with no extra sort needed.
+    let mut exit_refs: Vec<ExitRef> = Vec::new();
+    for (i, osm_id) in junction_ids.iter().enumerate() {
+        if !keep[i] {
+            continue;
+        }
+        if let Some(raw_ref) = exit_ref_tags.get(osm_id) {
+            let ref_id = acc.strings.intern(raw_ref);
+            exit_refs.push(ExitRef {
+                node_id: remap[i],
+                ref_id,
+            });
+        }
+    }
+    let exit_ref_nodes = exit_refs.len();
+
+    let edge_attrs = acc.attrs.attrs.clone();
+    let (string_offsets, string_blob) = acc.strings.finish();
 
     let nodes: Vec<NodeRecord> = new_lat
         .into_iter()
@@ -436,10 +680,20 @@ pub fn import_pbfs(
         ch_order: vec![0u32; node_count],
         geometry,
         snap_grid,
+        string_offsets,
+        string_blob,
+        edge_attrs,
+        edge_guide,
+        dest_signs,
+        exit_refs,
     };
     model.validate()?;
 
     let file_epochs = paths.iter().map(|p| (p.clone(), pbf_epoch(p))).collect();
+
+    println!(
+        "[osm_import] guidance: {named_edges} named edges, {dest_sign_edges} destination signs, {exit_ref_nodes} exit refs"
+    );
 
     Ok((
         model,
@@ -449,6 +703,9 @@ pub fn import_pbfs(
             edges: n_edges,
             dropped_scc_nodes,
             file_epochs,
+            named_edges,
+            dest_sign_edges,
+            exit_ref_nodes,
         },
     ))
 }
@@ -652,5 +909,91 @@ mod tests {
             parse_rfc3339_epoch("2026-08-26T20:22:15Z"),
             Some(1_787_775_735)
         );
+    }
+
+    // --- Format 2.0 guidance (wayfinder #65) --------------------------
+
+    #[test]
+    fn guide_flags_strips_link_suffix_and_sets_the_link_bit() {
+        let flags = guide_flags_for("motorway_link", &tags(&[("highway", "motorway_link")]));
+        assert_eq!(flags & 0x0F, packs::GUIDE_CLASS_MOTORWAY);
+        assert_ne!(flags & packs::GUIDE_FLAG_LINK, 0);
+        assert_eq!(flags & packs::GUIDE_FLAG_ROUNDABOUT, 0);
+    }
+
+    #[test]
+    fn guide_flags_maps_residential_with_no_link_bit() {
+        let flags = guide_flags_for("residential", &tags(&[("highway", "residential")]));
+        assert_eq!(flags & 0x0F, packs::GUIDE_CLASS_RESIDENTIAL);
+        assert_eq!(flags & packs::GUIDE_FLAG_LINK, 0);
+    }
+
+    #[test]
+    fn guide_flags_roundabout_and_circular_both_set_the_roundabout_bit() {
+        let roundabout = guide_flags_for(
+            "primary",
+            &tags(&[("highway", "primary"), ("junction", "roundabout")]),
+        );
+        let circular = guide_flags_for(
+            "primary",
+            &tags(&[("highway", "primary"), ("junction", "circular")]),
+        );
+        assert_ne!(roundabout & packs::GUIDE_FLAG_ROUNDABOUT, 0);
+        assert_ne!(circular & packs::GUIDE_FLAG_ROUNDABOUT, 0);
+
+        // Only `junction=roundabout` implies oneway; `circular` does not
+        // (behavior unchanged from before this ticket).
+        assert_eq!(
+            oneway_dir(&tags(&[("highway", "primary"), ("junction", "roundabout")])),
+            1
+        );
+        assert_eq!(
+            oneway_dir(&tags(&[("highway", "primary"), ("junction", "circular")])),
+            0
+        );
+    }
+
+    #[test]
+    fn accept_way_interns_name_ref_and_dedups_attr_pairs_across_ways() {
+        let mut acc = WayAccumulator::default();
+        let t1 = tags(&[
+            ("highway", "residential"),
+            ("name", "Avenue A"),
+            ("ref", "A6"),
+        ]);
+        acc.accept_way(1, &t1, vec![10, 11]);
+        // A second, distinct way with the identical (name, ref) pair should
+        // reuse the same interned attr, not create a duplicate.
+        let t2 = tags(&[
+            ("highway", "residential"),
+            ("name", "Avenue A"),
+            ("ref", "A6"),
+        ]);
+        acc.accept_way(2, &t2, vec![12, 13]);
+        assert_eq!(acc.ways[0].attr_idx, acc.ways[1].attr_idx);
+        // attrs: {0,0} (unnamed) plus the one interned pair.
+        assert_eq!(acc.attrs.attrs.len(), 2);
+
+        // A way with no name/ref at all gets the unnamed attr (id 0).
+        let t3 = tags(&[("highway", "residential")]);
+        acc.accept_way(3, &t3, vec![14, 15]);
+        assert_eq!(acc.ways[2].attr_idx, 0);
+    }
+
+    #[test]
+    fn destination_signage_only_attaches_to_the_forward_direction() {
+        let way = WayRec {
+            refs: vec![10, 11],
+            oneway: 0,
+            speed_kmh: 50.0,
+            road_class: 0,
+            attr_idx: 0,
+            guide_flags: 0,
+            dest_id: 7,
+            dest_ref_id: 8,
+            junction_ref_id: 9,
+        };
+        assert_eq!(dest_ids_for_direction(&way, true), (7, 8, 9));
+        assert_eq!(dest_ids_for_direction(&way, false), (0, 0, 0));
     }
 }

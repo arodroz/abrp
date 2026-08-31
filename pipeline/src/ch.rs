@@ -12,7 +12,7 @@ use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::time::Instant;
 
-use packs::{EdgeHot, RegionGraphModel};
+use packs::{EdgeHot, RegionGraphModel, CH_MIDDLE_NODE_NONE, GUIDE_NONE};
 
 /// Witness-search settle cap: a local Dijkstra that has already settled this
 /// many nodes gives up and assumes no witness exists (conservative: may add
@@ -342,7 +342,8 @@ pub fn ch_prepare(base: &RegionGraphModel) -> (RegionGraphModel, ChStats) {
                 ascent_m: s.ascent_m as f32,
                 descent_m: s.descent_m as f32,
                 road_class: 0,
-                _pad: [0; 3],
+                guide_flags: 0,
+                _pad: [0; 2],
                 ch_middle_node: v,
                 geom_offset: 0,
                 geom_count: 0,
@@ -404,6 +405,47 @@ pub fn ch_prepare(base: &RegionGraphModel) -> (RegionGraphModel, ChStats) {
     }
 
     let shortcuts_added = all.len() - base.edges.len();
+
+    // Guidance remap (wayfinder #65): originals appear in the final edge array in
+    // exactly base CSR order (stable sort, originals pushed first), so walking the
+    // final edges and consuming base.edge_guide sequentially reproduces the
+    // per-slot mapping; shortcuts get GUIDE_NONE. dest_signs re-key from base edge
+    // index to final slot the same way.
+    let (edge_guide, dest_signs) = if base.edge_guide.is_empty() {
+        (Vec::new(), Vec::new())
+    } else {
+        let mut base_to_final = vec![0u32; base.edges.len()];
+        let mut base_idx = 0usize;
+        let mut edge_guide = Vec::with_capacity(all.len());
+        for (final_slot, (_, e)) in all.iter().enumerate() {
+            if e.ch_middle_node == CH_MIDDLE_NODE_NONE {
+                base_to_final[base_idx] = final_slot as u32;
+                edge_guide.push(base.edge_guide[base_idx]);
+                base_idx += 1;
+            } else {
+                edge_guide.push(GUIDE_NONE);
+            }
+        }
+        assert_eq!(
+            base_idx,
+            base.edges.len(),
+            "guidance remap: expected {} original edges in the final array, walked {base_idx}",
+            base.edges.len()
+        );
+
+        let mut dest_signs: Vec<packs::DestSign> = base
+            .dest_signs
+            .iter()
+            .map(|d| packs::DestSign {
+                edge_slot: base_to_final[d.edge_slot as usize],
+                ..*d
+            })
+            .collect();
+        dest_signs.sort_by_key(|d| d.edge_slot);
+
+        (edge_guide, dest_signs)
+    };
+
     let edges: Vec<EdgeHot> = all.into_iter().map(|(_, e)| e).collect();
 
     let model = RegionGraphModel {
@@ -413,6 +455,12 @@ pub fn ch_prepare(base: &RegionGraphModel) -> (RegionGraphModel, ChStats) {
         ch_order,
         geometry: base.geometry.clone(),
         snap_grid: base.snap_grid.clone(),
+        string_offsets: base.string_offsets.clone(),
+        string_blob: base.string_blob.clone(),
+        edge_attrs: base.edge_attrs.clone(),
+        edge_guide,
+        dest_signs,
+        exit_refs: base.exit_refs.clone(),
     };
 
     (

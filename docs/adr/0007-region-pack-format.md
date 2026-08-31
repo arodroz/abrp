@@ -61,3 +61,37 @@ node-based CH kernel, so turn support changes the pack's *entities*, not its
   trip region is a pipeline run, not an app feature.
 - CONTEXT.md's Region Pack entry is amended: packs are pre-merged in the
   pipeline, never stitched on the phone.
+
+## Format 2.0 (2026-08-31, wayfinder #65)
+
+Carries the minimal turn-by-turn guidance tag set through to the reader, so a
+later maneuver-generation ticket has data to work with. Six new sections:
+`STRING_OFFSETS`/`STRING_BLOB` (an interned string table, id 0 = empty),
+`EDGE_ATTRS` (unique name/ref pairs), `EDGE_GUIDE` (one attr index per
+`EDGES_HOT` slot, `GUIDE_NONE` for shortcuts), `DEST_SIGNS` (sparse
+destination signage keyed by edge slot), and `EXIT_REFS` (sparse
+motorway-junction exit refs keyed by node id). `EdgeHot` also gains a
+`guide_flags` byte (highway class + link + roundabout), carved out of what
+was `_pad` -- the struct's size is unchanged. `road_class` (the energy
+crate's urban-surcharge signal) is untouched; `guide_flags` is a separate,
+independent byte.
+
+The new sections are written after every v1 section, so a v1 reader's fixed
+section list is still satisfied by a v2 file's first eight entries -- this
+reader accepts both `format_major == 1` and `== 2`, with guidance absent
+(empty accessors, `has_guidance() == false`) on the former. A future v1
+reader (the installed base at this pack's rollout) refuses a v2 file via the
+existing major-version check, unaffected by this change. This is why: the
+live bucket and installed regions are v1; new epochs ship v2, and devices
+upgrade to a v2-aware app on their own schedule.
+
+Note this reuses the "v2" version number Decision 5 reserved for
+arc-expansion (turn restrictions): that migration hasn't happened yet, and
+guidance metadata doesn't need it, so it ships first under the same major.
+Turn restrictions/arc-expansion, when built, will need major 3.
+
+Deliberately excluded: `turn:lanes`, pronunciation, `mini_roundabout`, and
+any baked maneuver classification. Classification (which fork is "slight"
+vs. "sharp", which exit gets called out) stays route-time code reading these
+raw tags, not a pipeline-baked field -- so tuning the maneuver heuristics
+never bumps the pack format.

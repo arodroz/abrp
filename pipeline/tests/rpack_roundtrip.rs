@@ -7,9 +7,11 @@
 use std::io::{Read, Seek, SeekFrom, Write};
 
 use packs::{
-    EdgeHot, GeomVertex, HeaderFixed, NodeRecord, RegionGraphModel, Rpack, RpackError,
-    SectionEntry, SnapGridHeader, SnapGridModel, CH_MIDDLE_NODE_NONE, SECTION_CH_ORDER,
-    SECTION_CSR, SECTION_EDGES_HOT, SECTION_NODES, SECTION_REVERSE_EDGES, SECTION_SNAP_GRID,
+    DestSign, EdgeAttr, EdgeHot, ExitRef, GeomVertex, HeaderFixed, NodeRecord, RegionGraphModel,
+    Rpack, RpackError, SectionEntry, SnapGridHeader, SnapGridModel, CH_MIDDLE_NODE_NONE,
+    GUIDE_NONE, SECTION_CH_ORDER, SECTION_CSR, SECTION_EDGES_HOT, SECTION_EDGE_GUIDE,
+    SECTION_NODES, SECTION_REVERSE_EDGES, SECTION_SNAP_GRID, SECTION_STRING_BLOB,
+    SECTION_STRING_OFFSETS,
 };
 use pipeline::{write_rpack, PackMeta};
 
@@ -118,7 +120,8 @@ fn build_model(seed: u64) -> RegionGraphModel {
                 ascent_m: rng.next_range_f32(0.0, 30.0),
                 descent_m: rng.next_range_f32(0.0, 30.0),
                 road_class: rng.next_range_u32(0, 7) as u8,
-                _pad: [0; 3],
+                guide_flags: 0,
+                _pad: [0; 2],
                 ch_middle_node,
                 geom_offset,
                 geom_count,
@@ -149,6 +152,7 @@ fn build_model(seed: u64) -> RegionGraphModel {
         ch_order,
         geometry,
         snap_grid,
+        ..Default::default()
     }
 }
 
@@ -186,7 +190,7 @@ fn round_trips_and_verifies() {
 
     let pack = Rpack::open(&path).unwrap();
 
-    assert_eq!(pack.format_version(), (1, 1));
+    assert_eq!(pack.format_version(), (2, 0));
     assert_eq!(pack.osm_snapshot_epoch(), meta.osm_snapshot_epoch);
     assert_eq!(pack.region_id(), meta.region_id);
     assert_eq!(pack.region_name(), meta.region_name);
@@ -293,20 +297,22 @@ fn refuses_unsupported_format_major() {
     let path = dir.path().join("future.rpack");
     write_rpack(&model, &meta, &path).unwrap();
 
-    // format_major is a little-endian u16 at byte offset 4.
+    // format_major is a little-endian u16 at byte offset 4. 3 is beyond
+    // what this reader knows about -- 1 and 2 are both accepted (wayfinder
+    // #65: a v1 reader can open a v2 pack with guidance simply absent).
     let mut file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open(&path)
         .unwrap();
     file.seek(SeekFrom::Start(4)).unwrap();
-    file.write_all(&2u16.to_le_bytes()).unwrap();
+    file.write_all(&3u16.to_le_bytes()).unwrap();
     drop(file);
 
     match Rpack::open(&path) {
-        Err(RpackError::UnsupportedVersion { major: 2 }) => {}
-        Err(other) => panic!("expected UnsupportedVersion {{ major: 2 }}, got {other}"),
-        Ok(_) => panic!("expected UnsupportedVersion {{ major: 2 }}, got Ok"),
+        Err(RpackError::UnsupportedVersion { major: 3 }) => {}
+        Err(other) => panic!("expected UnsupportedVersion {{ major: 3 }}, got {other}"),
+        Ok(_) => panic!("expected UnsupportedVersion {{ major: 3 }}, got Ok"),
     }
 }
 
@@ -479,7 +485,7 @@ fn refuses_section_overlapping_the_header_or_table() {
 
 /// `EdgeHot`'s field byte offsets, mirroring `core/packs/src/format.rs`'s
 /// `#[repr(C)]` layout (36 bytes total): target(4)@0, length_m(4)@4,
-/// speed_kmh(4)@8, ascent_m(4)@12, descent_m(4)@16, road_class(1)+pad(3)@20,
+/// speed_kmh(4)@8, ascent_m(4)@12, descent_m(4)@16, road_class(1)+guide_flags(1)+pad(2)@20,
 /// ch_middle_node(4)@24, geom_offset(4)@28, geom_count(4)@32.
 const EDGE_TARGET_OFFSET: usize = 0;
 const EDGE_GEOM_COUNT_OFFSET: usize = 32;
@@ -599,6 +605,364 @@ fn verify_structure_rejects_geometry_range_out_of_bounds() {
     let edges_offset = find_section_offset(&bytes, SECTION_EDGES_HOT);
     let geom_count_idx = edges_offset + EDGE_GEOM_COUNT_OFFSET;
     bytes[geom_count_idx..geom_count_idx + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+    std::fs::write(&path, &bytes).unwrap();
+
+    let pack = Rpack::open(&path).expect("this invariant is O(n), not checked by open");
+    assert!(pack.verify_structure().is_err());
+}
+
+// --- Format 2.0 guidance (wayfinder #65) -------------------------------
+
+/// Interns `strings` in order (id 0 is always `strings[0]`, expected to be
+/// `""`), producing the offsets/blob pair `SECTION_STRING_OFFSETS`/
+/// `SECTION_STRING_BLOB` want.
+fn intern_strings(strings: &[&str]) -> (Vec<u32>, Vec<u8>) {
+    let mut offsets = vec![0u32];
+    let mut blob = Vec::new();
+    for s in strings {
+        blob.extend_from_slice(s.as_bytes());
+        offsets.push(blob.len() as u32);
+    }
+    (offsets, blob)
+}
+
+/// A tiny 3-node, 2-edge model carrying real guidance: edge 0 (0->1) is
+/// "Avenue A" / "A6" with a destination sign ("Exit City" / "A6" / junction
+/// ref "43"); edge 1 (1->2) is unnamed. Node 1 also carries its own exit ref
+/// ("12"), independent of the destination sign's junction ref text.
+fn build_small_guidance_model() -> RegionGraphModel {
+    let nodes = vec![
+        NodeRecord {
+            lat: 49.5,
+            lon: 6.0,
+        },
+        NodeRecord {
+            lat: 49.6,
+            lon: 6.1,
+        },
+        NodeRecord {
+            lat: 49.7,
+            lon: 6.2,
+        },
+    ];
+    let edges = vec![
+        EdgeHot {
+            target: 1,
+            length_m: 1000.0,
+            speed_kmh: 90.0,
+            ascent_m: 0.0,
+            descent_m: 0.0,
+            road_class: 0,
+            guide_flags: 1,
+            _pad: [0; 2],
+            ch_middle_node: CH_MIDDLE_NODE_NONE,
+            geom_offset: 0,
+            geom_count: 0,
+        },
+        EdgeHot {
+            target: 2,
+            length_m: 500.0,
+            speed_kmh: 50.0,
+            ascent_m: 0.0,
+            descent_m: 0.0,
+            road_class: 0,
+            guide_flags: 0,
+            _pad: [0; 2],
+            ch_middle_node: CH_MIDDLE_NODE_NONE,
+            geom_offset: 0,
+            geom_count: 0,
+        },
+    ];
+
+    let (string_offsets, string_blob) =
+        intern_strings(&["", "Avenue A", "A6", "Exit City", "43", "12"]);
+    let edge_attrs = vec![
+        EdgeAttr {
+            name_id: 0,
+            ref_id: 0,
+        },
+        EdgeAttr {
+            name_id: 1,
+            ref_id: 2,
+        },
+    ];
+    let edge_guide = vec![1, 0];
+    let dest_signs = vec![DestSign {
+        edge_slot: 0,
+        dest_id: 3,
+        dest_ref_id: 2,
+        junction_ref_id: 4,
+    }];
+    let exit_refs = vec![ExitRef {
+        node_id: 1,
+        ref_id: 5,
+    }];
+
+    RegionGraphModel {
+        nodes,
+        csr_first_edge: vec![0, 1, 2, 2],
+        edges,
+        ch_order: vec![0, 1, 2],
+        geometry: Vec::new(),
+        snap_grid: SnapGridModel {
+            min_lat: 49.5,
+            min_lon: 6.0,
+            cell_size_deg: 1.0,
+            n_rows: 1,
+            n_cols: 1,
+            cell_offsets: vec![0, 3],
+            node_ids: vec![0, 1, 2],
+        },
+        string_offsets,
+        string_blob,
+        edge_attrs,
+        edge_guide,
+        dest_signs,
+        exit_refs,
+    }
+}
+
+#[test]
+fn guidance_round_trips() {
+    let model = build_small_guidance_model();
+    let meta = build_meta();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("guidance.rpack");
+    write_rpack(&model, &meta, &path).unwrap();
+
+    let pack = Rpack::open(&path).unwrap();
+    assert_eq!(pack.format_version(), (2, 0));
+    assert!(pack.has_guidance());
+
+    assert_eq!(pack.string_offsets(), model.string_offsets.as_slice());
+    assert_eq!(pack.string_blob(), model.string_blob.as_slice());
+    assert_eq!(pack.edge_attrs(), model.edge_attrs.as_slice());
+    assert_eq!(pack.edge_guide(), model.edge_guide.as_slice());
+    assert_eq!(pack.dest_signs(), model.dest_signs.as_slice());
+    assert_eq!(pack.exit_refs(), model.exit_refs.as_slice());
+
+    assert_eq!(pack.string(0), Some(""));
+    assert_eq!(pack.string(1), Some("Avenue A"));
+    assert_eq!(pack.string(2), Some("A6"));
+    assert_eq!(pack.string(3), Some("Exit City"));
+    assert_eq!(pack.string(4), Some("43"));
+    assert_eq!(pack.string(5), Some("12"));
+    assert_eq!(pack.string(6), None); // out of range
+
+    assert_eq!(pack.dest_sign_for_edge(0), Some(&model.dest_signs[0]));
+    assert_eq!(pack.dest_sign_for_edge(1), None); // edge 1 has no dest sign
+
+    assert_eq!(pack.exit_ref_for_node(1), Some(5));
+    assert_eq!(pack.exit_ref_for_node(0), None); // node 0 has no exit ref
+
+    pack.verify_checksums().expect("checksums should verify");
+    pack.verify_structure()
+        .expect("a pack built from a validated model should pass verify_structure");
+}
+
+#[test]
+fn empty_guidance_synthesizes_a_minimal_valid_v2_pack() {
+    let model = build_model(20);
+    let meta = build_meta();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("empty_guidance.rpack");
+    write_rpack(&model, &meta, &path).unwrap();
+
+    let pack = Rpack::open(&path).unwrap();
+    assert!(pack.has_guidance());
+    assert_eq!(
+        pack.edge_attrs(),
+        &[EdgeAttr {
+            name_id: 0,
+            ref_id: 0
+        }]
+    );
+    assert_eq!(pack.edge_guide().len(), model.edges.len());
+    for (i, e) in model.edges.iter().enumerate() {
+        let expected = if e.ch_middle_node == CH_MIDDLE_NODE_NONE {
+            0
+        } else {
+            GUIDE_NONE
+        };
+        assert_eq!(
+            pack.edge_guide()[i],
+            expected,
+            "edge {i}: ch_middle_node={}",
+            e.ch_middle_node
+        );
+    }
+    pack.verify_structure()
+        .expect("synthesized guidance should be internally consistent");
+}
+
+#[test]
+fn v1_pack_back_compat() {
+    let model = build_model(21);
+    let meta = build_meta();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("v1_backcompat.rpack");
+    write_rpack(&model, &meta, &path).unwrap();
+
+    let mut bytes = std::fs::read(&path).unwrap();
+    // format_major/minor are LE u16s at offsets 4/6; section_count is an LE
+    // u32 at offset 52 (HeaderFixed is 56 bytes: magic(4) + major(2) +
+    // minor(2) + epoch(8) + region_id(4) + region_name(32) = 52, then
+    // section_count). Truncating the *logical* section count to 8 makes
+    // the guidance sections (written after every v1 section) unreferenced
+    // trailing data -- a byte-valid v1 file, per the writer's ordering
+    // constraint.
+    bytes[4..6].copy_from_slice(&1u16.to_le_bytes());
+    bytes[6..8].copy_from_slice(&1u16.to_le_bytes());
+    bytes[52..56].copy_from_slice(&8u32.to_le_bytes());
+    std::fs::write(&path, &bytes).unwrap();
+
+    let pack = Rpack::open(&path).expect("a v1 pack must still open");
+    assert_eq!(pack.format_version(), (1, 1));
+    assert!(!pack.has_guidance());
+    assert_eq!(pack.string(0), None);
+    assert!(pack.string_offsets().is_empty());
+    assert!(pack.string_blob().is_empty());
+    assert!(pack.edge_attrs().is_empty());
+    assert!(pack.edge_guide().is_empty());
+    assert!(pack.dest_signs().is_empty());
+    assert!(pack.exit_refs().is_empty());
+    assert_eq!(pack.dest_sign_for_edge(0), None);
+    assert_eq!(pack.exit_ref_for_node(0), None);
+    pack.verify_structure()
+        .expect("v1 checks only -- no guidance to check");
+}
+
+#[test]
+fn malformed_v2_missing_guidance_section_is_rejected() {
+    let model = build_small_guidance_model();
+    let meta = build_meta();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("missing_guidance_section.rpack");
+    write_rpack(&model, &meta, &path).unwrap();
+
+    let mut bytes = std::fs::read(&path).unwrap();
+    let entry = find_table_entry_offset(&bytes, SECTION_STRING_OFFSETS);
+    bytes[entry..entry + 4].copy_from_slice(&999u32.to_le_bytes());
+    std::fs::write(&path, &bytes).unwrap();
+
+    match Rpack::open(&path) {
+        Err(RpackError::MissingSection { section_id }) => {
+            assert_eq!(section_id, SECTION_STRING_OFFSETS)
+        }
+        Err(other) => panic!("expected MissingSection, got {other}"),
+        Ok(_) => panic!("expected MissingSection, got Ok"),
+    }
+}
+
+#[test]
+fn malformed_v2_edge_guide_wrong_length_is_rejected() {
+    let model = build_small_guidance_model();
+    let meta = build_meta();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("edge_guide_wrong_len.rpack");
+    write_rpack(&model, &meta, &path).unwrap();
+
+    let mut bytes = std::fs::read(&path).unwrap();
+    let entry = find_table_entry_offset(&bytes, SECTION_EDGE_GUIDE);
+    // len_bytes is the entry's third field (u64 at byte 16, after
+    // section_id+pad and offset).
+    let len_bytes = u64::from_le_bytes(bytes[entry + 16..entry + 24].try_into().unwrap());
+    bytes[entry + 16..entry + 24].copy_from_slice(&(len_bytes - 4).to_le_bytes());
+    std::fs::write(&path, &bytes).unwrap();
+
+    match Rpack::open(&path) {
+        Err(RpackError::Validation(_)) => {}
+        Err(other) => panic!("expected Validation, got {other}"),
+        Ok(_) => panic!("expected Validation, got Ok"),
+    }
+}
+
+#[test]
+fn malformed_v2_last_string_offset_mismatched_blob_len_is_rejected() {
+    let model = build_small_guidance_model();
+    let meta = build_meta();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("bad_last_string_offset.rpack");
+    write_rpack(&model, &meta, &path).unwrap();
+
+    let mut bytes = std::fs::read(&path).unwrap();
+    let string_offsets_addr = find_section_offset(&bytes, SECTION_STRING_OFFSETS);
+    let last_idx = string_offsets_addr + (model.string_offsets.len() - 1) * 4;
+    bytes[last_idx..last_idx + 4].copy_from_slice(&999u32.to_le_bytes());
+    std::fs::write(&path, &bytes).unwrap();
+
+    assert!(Rpack::open(&path).is_err());
+}
+
+#[test]
+fn malformed_v2_non_monotone_string_offsets_passes_open_but_fails_verify_structure() {
+    let model = build_small_guidance_model();
+    let meta = build_meta();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("non_monotone_string_offsets.rpack");
+    write_rpack(&model, &meta, &path).unwrap();
+
+    let mut bytes = std::fs::read(&path).unwrap();
+    let string_offsets_addr = find_section_offset(&bytes, SECTION_STRING_OFFSETS);
+    // Index 2 is neither the first nor the last entry: forcing it above the
+    // (unchanged) index-3 entry breaks monotonicity without touching the
+    // first/last values `open` checks.
+    let idx2 = string_offsets_addr + 2 * 4;
+    bytes[idx2..idx2 + 4].copy_from_slice(&999u32.to_le_bytes());
+    std::fs::write(&path, &bytes).unwrap();
+
+    let pack = Rpack::open(&path).expect("monotonicity is verify_structure's job, not open's");
+    assert!(pack.verify_structure().is_err());
+}
+
+#[test]
+fn malformed_v2_invalid_utf8_in_string_blob_fails_verify_structure() {
+    let model = build_small_guidance_model();
+    let meta = build_meta();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("invalid_utf8_blob.rpack");
+    write_rpack(&model, &meta, &path).unwrap();
+
+    let mut bytes = std::fs::read(&path).unwrap();
+    let blob_addr = find_section_offset(&bytes, SECTION_STRING_BLOB);
+    bytes[blob_addr] = 0xFF; // never a valid UTF-8 byte on its own
+    std::fs::write(&path, &bytes).unwrap();
+
+    let pack = Rpack::open(&path).expect("utf8 validity is verify_structure's job, not open's");
+    assert!(pack.verify_structure().is_err());
+}
+
+#[test]
+fn malformed_v2_original_edge_guide_none_fails_verify_structure() {
+    let model = build_small_guidance_model();
+    let meta = build_meta();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("original_edge_guide_none.rpack");
+    write_rpack(&model, &meta, &path).unwrap();
+
+    let mut bytes = std::fs::read(&path).unwrap();
+    let edge_guide_addr = find_section_offset(&bytes, SECTION_EDGE_GUIDE);
+    // Edge 0 is original (ch_middle_node == CH_MIDDLE_NODE_NONE); its guide
+    // must never be GUIDE_NONE.
+    bytes[edge_guide_addr..edge_guide_addr + 4].copy_from_slice(&GUIDE_NONE.to_le_bytes());
+    std::fs::write(&path, &bytes).unwrap();
+
+    let pack = Rpack::open(&path).expect("this invariant is O(n), not checked by open");
+    assert!(pack.verify_structure().is_err());
+}
+
+#[test]
+fn malformed_v2_edge_guide_attr_out_of_range_fails_verify_structure() {
+    let model = build_small_guidance_model();
+    let meta = build_meta();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("edge_guide_attr_out_of_range.rpack");
+    write_rpack(&model, &meta, &path).unwrap();
+
+    let mut bytes = std::fs::read(&path).unwrap();
+    let edge_guide_addr = find_section_offset(&bytes, SECTION_EDGE_GUIDE);
+    // The model has 2 edge_attrs (ids 0, 1); 5 is out of range.
+    bytes[edge_guide_addr..edge_guide_addr + 4].copy_from_slice(&5u32.to_le_bytes());
     std::fs::write(&path, &bytes).unwrap();
 
     let pack = Rpack::open(&path).expect("this invariant is O(n), not checked by open");

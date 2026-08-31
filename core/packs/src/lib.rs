@@ -10,10 +10,15 @@ pub mod reader;
 
 pub use error::RpackError;
 pub use format::{
-    align_up, EdgeHot, GeomVertex, HeaderFixed, NodeRecord, RegionGraphModel, SectionEntry,
-    SnapGridHeader, SnapGridModel, ALIGN, CH_MIDDLE_NODE_NONE, FORMAT_MAJOR, FORMAT_MINOR, MAGIC,
-    REGION_NAME_LEN, SECTION_CH_ORDER, SECTION_CSR, SECTION_EDGES_HOT, SECTION_GEOMETRY,
-    SECTION_NODES, SECTION_REVERSE_CSR, SECTION_REVERSE_EDGES, SECTION_SNAP_GRID,
+    align_up, DestSign, EdgeAttr, EdgeHot, ExitRef, GeomVertex, HeaderFixed, NodeRecord,
+    RegionGraphModel, SectionEntry, SnapGridHeader, SnapGridModel, ALIGN, CH_MIDDLE_NODE_NONE,
+    FORMAT_MAJOR, FORMAT_MINOR, GUIDE_CLASS_LIVING_STREET, GUIDE_CLASS_MOTORWAY,
+    GUIDE_CLASS_NONE, GUIDE_CLASS_PRIMARY, GUIDE_CLASS_RESIDENTIAL, GUIDE_CLASS_SECONDARY,
+    GUIDE_CLASS_TERTIARY, GUIDE_CLASS_TRUNK, GUIDE_CLASS_UNCLASSIFIED, GUIDE_FLAG_LINK,
+    GUIDE_FLAG_ROUNDABOUT, GUIDE_NONE, MAGIC, REGION_NAME_LEN, SECTION_CH_ORDER, SECTION_CSR,
+    SECTION_DEST_SIGNS, SECTION_EDGES_HOT, SECTION_EDGE_ATTRS, SECTION_EDGE_GUIDE,
+    SECTION_EXIT_REFS, SECTION_GEOMETRY, SECTION_NODES, SECTION_REVERSE_CSR,
+    SECTION_REVERSE_EDGES, SECTION_SNAP_GRID, SECTION_STRING_BLOB, SECTION_STRING_OFFSETS,
 };
 pub use reader::{alignment_padding, Rpack};
 
@@ -36,7 +41,7 @@ mod tests {
     #[test]
     fn edge_hot_has_no_implicit_padding_beyond_the_explicit_pad_byte() {
         // target(4) + length_m(4) + speed_kmh(4) + ascent_m(4) + descent_m(4)
-        // + road_class(1) + _pad(3) + ch_middle_node(4) + geom_offset(4) + geom_count(4)
+        // + road_class(1) + guide_flags(1) + _pad(2) + ch_middle_node(4) + geom_offset(4) + geom_count(4)
         assert_eq!(size_of::<EdgeHot>(), 36);
     }
 
@@ -82,7 +87,8 @@ mod tests {
                 ascent_m: 1.0,
                 descent_m: 0.0,
                 road_class: 3,
-                _pad: [0; 3],
+                guide_flags: 0,
+                _pad: [0; 2],
                 ch_middle_node: CH_MIDDLE_NODE_NONE,
                 geom_offset: 0,
                 geom_count: 2,
@@ -111,6 +117,12 @@ mod tests {
                 cell_offsets: vec![0, 2],
                 node_ids: vec![0, 1],
             },
+            string_offsets: Vec::new(),
+            string_blob: Vec::new(),
+            edge_attrs: Vec::new(),
+            edge_guide: Vec::new(),
+            dest_signs: Vec::new(),
+            exit_refs: Vec::new(),
         }
     }
 

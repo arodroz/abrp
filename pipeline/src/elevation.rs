@@ -615,7 +615,8 @@ mod tests {
                 ascent_m: 0.0,
                 descent_m: 0.0,
                 road_class: 3,
-                _pad: [0; 3],
+                guide_flags: 0,
+                _pad: [0; 2],
                 ch_middle_node: CH_MIDDLE_NODE_NONE,
                 geom_offset: 0,
                 geom_count: geometry.len() as u32,
@@ -631,6 +632,7 @@ mod tests {
                 cell_offsets: vec![0, 2],
                 node_ids: vec![0, 1],
             },
+            ..Default::default()
         }
     }
 

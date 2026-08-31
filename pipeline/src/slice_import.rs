@@ -141,7 +141,8 @@ pub fn build_base_model(
                 ascent_m: 0.0,
                 descent_m: 0.0,
                 road_class: 0,
-                _pad: [0; 3],
+                guide_flags: 0,
+                _pad: [0; 2],
                 ch_middle_node: CH_MIDDLE_NODE_NONE,
                 geom_offset: e.geom_offset,
                 geom_count: e.geom_len,
@@ -159,6 +160,7 @@ pub fn build_base_model(
         ch_order: vec![0u32; n_nodes],
         geometry,
         snap_grid,
+        ..Default::default()
     };
 
     Ok((
