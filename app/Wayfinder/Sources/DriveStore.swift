@@ -24,8 +24,14 @@
 // the start-SoC alert (via `pendingGo`) unless a standalone capture is already `.recording`, in
 // which case it's adopted as the drive's capture outright. End or destination arrival stops
 // capture with the end-SoC prompt; cancelling the start prompt cancels the Go, no half-open
-// capture. Per-sample Trip Log wiring beyond start/stop (#67) is still a later ticket, also keyed
-// off `distanceAlongRouteM`.
+// capture.
+//
+// Maneuver banners (wayfinder #67, ADR 0012 point 3's HUD extended to turn-by-turn guidance):
+// `banner` is StepTracker's upcoming-step lookup resolved into display values, recomputed on
+// EVERY fix while driving (unthrottled -- the countdown is the point) and muted while off-route-
+// but-unreplanned or mid-replan, same as the HUD stays live but the banner shouldn't imply a
+// route that may no longer be current. `guidanceSteps` is rebuilt at every `snapshotPlan` call,
+// so a replan swap can never leave a banner pointing at stale step indices.
 import CoreLocation
 import Foundation
 import MapLibre
@@ -67,6 +73,10 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
     /// `go()` computes the first (unthrottled) value. See `computeHud` and `ingest`'s throttle
     /// comment for the update policy.
     private(set) var hud: DriveHud?
+    /// The maneuver banner's current display values (wayfinder #67), nil whenever there's no
+    /// upcoming step (v1 pack, guidance exhausted) or guidance is muted (off-route-but-
+    /// unreplanned, mid-replan) -- see `computeBanner`.
+    private(set) var banner: ManeuverBanner?
     /// Charging Stops passed -- an index into `stopVMs` (and `plan.stops`), not a count of
     /// arbitrary events: ADR 0012 point 3's only stepper.
     private(set) var checkedStopCount = 0
@@ -93,6 +103,17 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
         let nextIsDestination: Bool
     }
 
+    /// One resolved maneuver banner (wayfinder #67): `distanceM` is the live countdown
+    /// (`GuidanceStep.distAlongRouteM - distanceAlongRouteM`), everything else copied straight
+    /// off the upcoming `StepTracker.GuidanceStep`.
+    struct ManeuverBanner: Equatable {
+        let iconSystemName: String
+        let distanceM: Double
+        let primary: String
+        let secondary: String?
+        let then: String?
+    }
+
     /// ADR 0012 point 2's Go gate: origin provenance (adopted from a location fix, not
     /// overridden since) and a plan actually on screen.
     var canGo: Bool {
@@ -109,6 +130,9 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
     /// Snapshotted at `go()` for the HUD engine (wayfinder #60) -- see that method's comment.
     private var drivePlan: FfiPlan?
     private var stopVMs: [ChargingStopVM] = []
+    /// The current Plan's banner-eligible steps (wayfinder #67), rebuilt on every `snapshotPlan`
+    /// call -- see that method and `computeBanner`.
+    private var guidanceSteps: [StepTracker.GuidanceStep] = []
     /// Cumulative leg-end distances, one entry per `drivePlan.legs`; `legEndsM.last == totalDistM`.
     private var legEndsM: [Double] = []
     /// Per-leg average speed (`leg.distM / leg.driveS`), 0 for a zero-duration leg.
@@ -176,14 +200,17 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
     private func enterDrive() {
         guard canGo, let plan = planStore.displayedPlan else { return }
 
+        // Flags reset BEFORE snapshotPlan (wayfinder #67): snapshotPlan now computes the initial
+        // banner, and computeBanner mutes while `replanInFlight` -- a drive entered right after a
+        // previous drive ended mid-replan would otherwise start with a wrongly muted banner.
+        offRouteSinceFixTimestamp = nil
+        replanInFlight = false
+        driveSession += 1
         snapshotPlan(plan)
         snappedCoordinate = nil
         isOnRoute = false
         smoothedCourseDeg = 0
         driveCardExpanded = false
-        offRouteSinceFixTimestamp = nil
-        replanInFlight = false
-        driveSession += 1
 
         phase = .driving
         cameraMode = .following
@@ -197,6 +224,32 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
         locationManager.activityType = .automotiveNavigation
         locationManager.requestWhenInUseAuthorization()
         locationManager.startUpdatingLocation()
+
+        // e2e drive seam (wayfinder #67), mirror of PlanStore's `-simulatedLocationFix` seam:
+        // XCUITest cannot inject CoreLocation fixes, so `-simulatedDriveDistancesM` (a
+        // ";"-separated list of along-route meters, launch-argument domain -- only the UI test
+        // passes it) drives synthetic fixes into `ingest` on a timer, to exercise the maneuver
+        // banner countdown in the real UI. Guarded by phase/`driveSession` so a stale seam from a
+        // previous drive can never ingest into a later one. The 2.5 s cadence is deliberate slack:
+        // the test reads the countdown label only after several UI waits, so the fix train must
+        // outlast them for a label CHANGE to still be observable -- a fast burst would be fully
+        // consumed before the first read.
+        if let raw = UserDefaults.standard.string(forKey: "simulatedDriveDistancesM") {
+            let distancesM = raw.split(separator: ";").compactMap { Double($0) }
+            let session = driveSession
+            Task {
+                for distanceM in distancesM {
+                    guard phase == .driving, driveSession == session else { return }
+                    if let coordinate = coordinate(atRouteDistanceM: distanceM) {
+                        ingest(CLLocation(
+                            coordinate: coordinate, altitude: 300, horizontalAccuracy: 5, verticalAccuracy: 5,
+                            course: -1, speed: 15, timestamp: Date()
+                        ))
+                    }
+                    try? await Task.sleep(nanoseconds: 2_500_000_000)
+                }
+            }
+        }
     }
 
     /// HUD/geometry snapshot shared by `go()` (full entry) and the off-route replan swap
@@ -224,6 +277,11 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
         currentLegIndex = 0
         lastHudFixTimestamp = nil
         hud = computeHud(distanceAlongM: 0)
+
+        // wayfinder #67: rebuilt here, the same atomic swap point `hud` uses -- a banner index
+        // can never survive a snapshot swap by construction.
+        guidanceSteps = StepTracker.guidanceSteps(legs: plan.legs, stops: stopVMs, polyline: routePolyline, cumulativeM: routeCumulativeM)
+        banner = computeBanner()
     }
 
     /// The Plan and its map layers stay intact -- planning UI just returns, via RootView's
@@ -239,6 +297,7 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
         puckAnnotation = nil
         planStore.mapView.showsUserLocation = true
         driveCardExpanded = false
+        banner = nil
         phase = .idle
         if tripStore.phase == .recording { tripStore.stopTapped() }
     }
@@ -277,6 +336,7 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
         if distanceAlongRouteM >= (drivePlan?.totalDistM ?? 0) - 40 {
             phase = .arrived
             hud = computeHud(distanceAlongM: distanceAlongRouteM)
+            banner = nil
             lastHudFixTimestamp = location.timestamp
             locationManager.stopUpdatingLocation()
             if tripStore.phase == .recording { tripStore.stopTapped() }
@@ -320,6 +380,11 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
         if cameraMode == .following {
             applyFollowingCamera()
         }
+
+        // Maneuver banner (wayfinder #67): recomputed on EVERY fix, unthrottled -- the countdown
+        // is the point. Placed after the off-route bookkeeping above so the muted state
+        // (off-route-but-unreplanned) is current-fix-accurate.
+        banner = computeBanner()
 
         // HUD throttle (ADR 0012 point 3, >=1 s UI deltas): keyed on the FIX's own timestamp,
         // not wall-clock time, so this is deterministic for drive-smoke's synthetic fixes -- a
@@ -453,6 +518,44 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
             previous = point
         }
         return previous.soc
+    }
+
+    // MARK: Maneuver banner (wayfinder #67, ADR 0012 point 3)
+
+    /// `nil` when `guidanceSteps` is empty (v1 pack, or none left), when guidance is muted
+    /// (a sustained off-route excursion not yet replanned, or a replan in flight -- the
+    /// displayed route may no longer be current), or when no upcoming step remains. Otherwise
+    /// built from the upcoming `StepTracker.GuidanceStep`, with the live countdown distance.
+    private func computeBanner() -> ManeuverBanner? {
+        guard !guidanceSteps.isEmpty, offRouteSinceFixTimestamp == nil, !replanInFlight,
+              let idx = StepTracker.upcomingIndex(steps: guidanceSteps, distanceAlongRouteM: distanceAlongRouteM)
+        else { return nil }
+        let step = guidanceSteps[idx]
+        return ManeuverBanner(
+            iconSystemName: step.iconSystemName, distanceM: max(0, step.distAlongRouteM - distanceAlongRouteM),
+            primary: step.primary, secondary: step.secondary, then: step.then
+        )
+    }
+
+    /// The polyline point at `targetM` along-route (wayfinder #67's e2e seam), interpolating
+    /// within whichever segment `targetM` falls in. `nil` only when the polyline has fewer than
+    /// 2 points (never true once a Plan is snapshotted).
+    private func coordinate(atRouteDistanceM targetM: Double) -> CLLocationCoordinate2D? {
+        guard routePolyline.count >= 2, let routeLenM = routeCumulativeM.last else { return nil }
+        let clampedM = max(0, min(targetM, routeLenM))
+        for i in 0..<(routePolyline.count - 1) {
+            let segEndM = routeCumulativeM[i + 1]
+            guard clampedM <= segEndM || i == routePolyline.count - 2 else { continue }
+            let segStartM = routeCumulativeM[i]
+            let segLenM = segEndM - segStartM
+            let t = segLenM > 0 ? max(0, min(1, (clampedM - segStartM) / segLenM)) : 0
+            let a = routePolyline[i]
+            let b = routePolyline[i + 1]
+            return CLLocationCoordinate2D(
+                latitude: a.latitude + t * (b.latitude - a.latitude), longitude: a.longitude + t * (b.longitude - a.longitude)
+            )
+        }
+        return routePolyline.last
     }
 
     private static func stepCourse(current: Double, target: Double, maxStepDeg: Double) -> Double {

@@ -90,13 +90,16 @@ enum RouteSnap {
         )
     }
 
-    private static func project(_ coordinate: CLLocationCoordinate2D, cosLat: Double) -> (x: Double, y: Double) {
+    /// Internal, not private (wayfinder #67): StepTracker's step-to-polyline anchoring reuses
+    /// this same local-equirectangular projection instead of duplicating it.
+    static func project(_ coordinate: CLLocationCoordinate2D, cosLat: Double) -> (x: Double, y: Double) {
         (x: coordinate.longitude * metersPerDegLat * cosLat, y: coordinate.latitude * metersPerDegLat)
     }
 
     /// Standard point-to-segment projection in the local metric plane: `t` in [0, 1] along a->b,
-    /// clamped at the endpoints, plus the resulting distance from `fix` to that point.
-    private static func closestPointOnSegment(
+    /// clamped at the endpoints, plus the resulting distance from `fix` to that point. Internal,
+    /// not private (wayfinder #67), for the same reason as `project` above.
+    static func closestPointOnSegment(
         fix: (x: Double, y: Double), a: (x: Double, y: Double), b: (x: Double, y: Double)
     ) -> (t: Double, distM: Double) {
         let dx = b.x - a.x

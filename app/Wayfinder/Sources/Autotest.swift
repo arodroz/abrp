@@ -70,7 +70,15 @@
 // producer. Its last step (wayfinder #63) proves manual mid-drive dash-SoC
 // correction: `correctSoc` replans from the snapped position at the entered
 // SoC (not the model's curve estimate), the HUD/curve re-anchor to it, and
-// it's a no-op once the drive is over.
+// it's a no-op once the drive is over. Its newest steps (wayfinder #67) prove
+// the maneuver banner: the initial upcoming step and its distance right after
+// entry, the countdown decreasing across two fixes approaching an anchor,
+// advancing to the next step once passed, the literal EN template table
+// pinned against a real corridor-pack landmark (A6 on-ramp signage), the
+// "then" preview on a closely-chained pair, muting during a sustained
+// off-route excursion, clearing on arrival, and correctly re-deriving after
+// an off-route replan swap -- all degrading to "banner stays nil" on a v1
+// pack, since `steps` is empty on every leg there.
 import CoreLocation
 import CryptoKit
 import Darwin
@@ -1695,6 +1703,33 @@ enum Autotest {
             driveCumulativeM.firstIndex { $0 >= targetM }
         }
 
+        // wayfinder #67: computed once, reused by every "banner-*" assert below. Empty on a v1
+        // pack (every leg's `steps` is empty) -- each assert below degrades to "banner stays
+        // nil" in that case and reports it as such.
+        let expectedGuidance = StepTracker.guidanceSteps(
+            legs: plan.legs, stops: ChargingStopVM.stops(from: plan),
+            polyline: plan.polyline.map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) },
+            cumulativeM: driveCumulativeM
+        )
+        let stepsPresent = !expectedGuidance.isEmpty
+
+        // "banner-initial": go()'s snapshotPlan already computed the banner at distance 0, same
+        // atomic swap point as "hud-initial" above.
+        let firstUpcomingIdx = StepTracker.upcomingIndex(steps: expectedGuidance, distanceAlongRouteM: 0)
+        let bannerInitialOk: Bool
+        if stepsPresent, let idx = firstUpcomingIdx {
+            let expectedStep = expectedGuidance[idx]
+            bannerInitialOk = driveStore.banner != nil && driveStore.banner?.primary == expectedStep.primary
+                && isClose(driveStore.banner?.distanceM ?? -1, expectedStep.distAlongRouteM, tol: 1)
+        } else {
+            bannerInitialOk = driveStore.banner == nil
+        }
+        report(
+            "banner-initial", bannerInitialOk,
+            stepsPresent ? "banner=\(String(describing: driveStore.banner))" : "v1 pack, banner hidden"
+        )
+        ok = ok && bannerInitialOk
+
         let base = Date()
         func fix(atVertex idx: Int, at time: Date) -> CLLocation {
             let point = plan.polyline[idx]
@@ -1733,12 +1768,115 @@ enum Autotest {
         )
         ok = ok && updatesOk
 
-        // Step: stop check-off, only meaningful if the plan has stops.
+        // "banner-countdown"/"banner-advance" (wayfinder #67): pick the first guidance step past
+        // 2500 m in (falling back to the last one) as an anchor, approach it with two fixes, then
+        // pass it with a third.
+        let anchorIndex: Int? = {
+            if let k = expectedGuidance.firstIndex(where: { $0.distAlongRouteM > 2500 }) { return k }
+            return expectedGuidance.isEmpty ? nil : expectedGuidance.count - 1
+        }()
+        let anchorM = anchorIndex.map { expectedGuidance[$0].distAlongRouteM } ?? 2500.0
+
+        if let vertexNear1 = firstVertexIndex(atOrAfterM: max(0, anchorM - 1200)),
+           let vertexNear2 = firstVertexIndex(atOrAfterM: max(0, anchorM - 400)) {
+            driveStore.ingest(fix(atVertex: vertexNear1, at: base.addingTimeInterval(3)))
+            let bannerNear1 = driveStore.banner
+            let distAlongNear1 = driveStore.distanceAlongRouteM
+
+            driveStore.ingest(fix(atVertex: vertexNear2, at: base.addingTimeInterval(4.5)))
+            let bannerNear2 = driveStore.banner
+            let distAlongNear2 = driveStore.distanceAlongRouteM
+
+            let countdownOk: Bool
+            if stepsPresent {
+                countdownOk = bannerNear1 != nil && bannerNear2 != nil
+                    && bannerNear2!.distanceM < bannerNear1!.distanceM
+                    && isClose(bannerNear1!.distanceM, anchorM - distAlongNear1, tol: 1)
+                    && isClose(bannerNear2!.distanceM, anchorM - distAlongNear2, tol: 1)
+            } else {
+                countdownOk = bannerNear1 == nil && bannerNear2 == nil
+            }
+            report(
+                "banner-countdown", countdownOk,
+                stepsPresent
+                    ? "bannerNear1=\(String(describing: bannerNear1)) bannerNear2=\(String(describing: bannerNear2))"
+                    : "v1 pack, banner hidden"
+            )
+            ok = ok && countdownOk
+        } else {
+            report("banner-countdown", false, "polyline too short for banner-countdown's vertices")
+            ok = false
+        }
+
+        if let vertexPastAnchor = firstVertexIndex(atOrAfterM: anchorM + StepTracker.passedBufferM + 5) {
+            driveStore.ingest(fix(atVertex: vertexPastAnchor, at: base.addingTimeInterval(6)))
+            let advanceOk: Bool
+            if stepsPresent, let k = anchorIndex {
+                advanceOk = k + 1 < expectedGuidance.count
+                    ? driveStore.banner?.primary == expectedGuidance[k + 1].primary
+                    : driveStore.banner == nil
+            } else {
+                advanceOk = driveStore.banner == nil
+            }
+            report(
+                "banner-advance", advanceOk,
+                stepsPresent ? "banner=\(String(describing: driveStore.banner))" : "v1 pack, banner hidden"
+            )
+            ok = ok && advanceOk
+        } else {
+            report("banner-advance", false, "polyline too short for banner-advance's vertex")
+            ok = false
+        }
+
+        // "banner-landmark" (wayfinder #67): pins the literal EN template table against a real
+        // golden signage string -- the A6 on-ramp's "Toutes Directions" destination, ~3.9 km in
+        // on the corridor pack's LU -> Amsterdam plan.
+        if autotestRegion == "corridor" {
+            if stepsPresent, let landmarkStep = expectedGuidance.first(where: { ($0.secondary ?? "").contains("Toutes Directions") }) {
+                let landmarkOk = landmarkStep.primary.hasPrefix("Take the ramp") && landmarkStep.secondary == "toward Toutes Directions"
+                report(
+                    "banner-landmark", landmarkOk,
+                    "primary=\(landmarkStep.primary) secondary=\(String(describing: landmarkStep.secondary))"
+                )
+                ok = ok && landmarkOk
+            } else {
+                report("banner-landmark", false, "no onRamp step with 'Toutes Directions' signage found on the corridor plan")
+                ok = false
+            }
+        } else {
+            report("banner-landmark", true, "not corridor, landmark skipped")
+        }
+
+        // "banner-then": any adjacent pair chained within `thenChainThresholdM` pins both the
+        // precomputed field and (when a suitable approach vertex exists) the live banner.
+        if let pairIdx = (0..<max(0, expectedGuidance.count - 1))
+            .first(where: { expectedGuidance[$0 + 1].distAlongRouteM - expectedGuidance[$0].distAlongRouteM < StepTracker.thenChainThresholdM }) {
+            let thenFieldOk = expectedGuidance[pairIdx].then == expectedGuidance[pairIdx + 1].primary
+            var liveThenOk = true
+            var liveDetail = "no vertex available for the live check"
+            if let vertexBeforePair = firstVertexIndex(atOrAfterM: max(0, expectedGuidance[pairIdx].distAlongRouteM - 600)) {
+                driveStore.ingest(fix(atVertex: vertexBeforePair, at: base.addingTimeInterval(6.5)))
+                let landedOnPair = StepTracker.upcomingIndex(steps: expectedGuidance, distanceAlongRouteM: driveStore.distanceAlongRouteM) == pairIdx
+                liveThenOk = !landedOnPair || driveStore.banner?.then == expectedGuidance[pairIdx + 1].primary
+                liveDetail = "landedOnPair=\(landedOnPair) banner=\(String(describing: driveStore.banner))"
+            }
+            let bannerThenOk = thenFieldOk && liveThenOk
+            report(
+                "banner-then", bannerThenOk,
+                "pairIdx=\(pairIdx) thenField=\(String(describing: expectedGuidance[pairIdx].then)) \(liveDetail)"
+            )
+            ok = ok && bannerThenOk
+        } else {
+            report("banner-then", true, "no close pair in plan")
+        }
+
+        // Step: stop check-off, only meaningful if the plan has stops. (Timestamp shifted to +8,
+        // wayfinder #67, to stay strictly after the banner fixes above at +3..+6.5.)
         let stops = ChargingStopVM.stops(from: plan)
         if stops.isEmpty {
             report("stop-checked", true, "no stops in plan")
         } else if let firstStop = stops.first, let stopVertex = firstVertexIndex(atOrAfterM: firstStop.distFromStartM + 100) {
-            driveStore.ingest(fix(atVertex: stopVertex, at: base.addingTimeInterval(3)))
+            driveStore.ingest(fix(atVertex: stopVertex, at: base.addingTimeInterval(8)))
             let checkedOk = driveStore.checkedStopCount == 1
             let nextOk = stops.count == 1
                 ? driveStore.hud?.nextIsDestination == true
@@ -1756,14 +1894,20 @@ enum Autotest {
             ok = false
         }
 
-        // Step: arrival -- feed the last polyline vertex.
-        driveStore.ingest(fix(atVertex: plan.polyline.count - 1, at: base.addingTimeInterval(5)))
+        // Step: arrival -- feed the last polyline vertex. (Timestamp shifted to +10, wayfinder
+        // #67, to stay strictly after the banner fixes above at +3..+6.5.)
+        driveStore.ingest(fix(atVertex: plan.polyline.count - 1, at: base.addingTimeInterval(10)))
         let arrivalOk = driveStore.phase == .arrived && (driveStore.hud?.remainingDistM ?? .infinity) <= 40
         report(
             "arrival", arrivalOk,
             "phase=\(driveStore.phase) remainingDistM=\(String(describing: driveStore.hud?.remainingDistM))"
         )
         ok = ok && arrivalOk
+
+        // "banner-arrival" (wayfinder #67): arrival clears the banner.
+        let bannerArrivalOk = driveStore.banner == nil
+        report("banner-arrival", bannerArrivalOk, "banner=\(String(describing: driveStore.banner))")
+        ok = ok && bannerArrivalOk
 
         // Destination arrival also closes capture (wayfinder #62) with the end-SoC prompt.
         let arrivalStopsCaptureOk = tripStore.phase == .promptingEndSoc
@@ -1845,6 +1989,13 @@ enum Autotest {
         driveStore.ingest(offsetFix61(at: base61.addingTimeInterval(4)))
         driveStore.ingest(offsetFix61(at: base61.addingTimeInterval(6)))
         driveStore.ingest(offsetFix61(at: base61.addingTimeInterval(7.5)))
+
+        // "banner-muted" (wayfinder #67): guidance mutes during a sustained off-route excursion
+        // in progress -- holds trivially on a v1 pack too, since the banner is already nil there.
+        let bannerMutedOk = driveStore.banner == nil
+        report("banner-muted", bannerMutedOk, "banner=\(String(describing: driveStore.banner))")
+        ok = ok && bannerMutedOk
+
         let expectedSoc61 = manualInterpolatedSoc(plan61.socCurve, at: driveStore.distanceAlongRouteM)
 
         let replanLanded61 = await waitWithTimeout(seconds: 30) { driveStore.routeUpdatedVersion == 1 }
@@ -1892,6 +2043,29 @@ enum Autotest {
                 + "isOnRoute=\(driveStore.isOnRoute) distanceAlongRouteM=\(driveStore.distanceAlongRouteM)"
         )
         ok = ok && survivesOk
+
+        // "banner-after-replan" (wayfinder #67): the banner re-derives against the NEW plan's
+        // own guidance steps, recomputed independently here rather than reusing `expectedGuidance`
+        // (that one is still keyed off the pre-replan `plan`).
+        let newPolyline61 = newPlan61.polyline.map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
+        let newExpectedGuidance61 = StepTracker.guidanceSteps(
+            legs: newPlan61.legs, stops: ChargingStopVM.stops(from: newPlan61),
+            polyline: newPolyline61, cumulativeM: RouteSnap.cumulativeDistances(newPolyline61)
+        )
+        let newStepsPresent61 = !newExpectedGuidance61.isEmpty
+        let bannerAfterReplanOk: Bool
+        if newStepsPresent61 {
+            let newUpcomingIdx61 = StepTracker.upcomingIndex(steps: newExpectedGuidance61, distanceAlongRouteM: driveStore.distanceAlongRouteM)
+            bannerAfterReplanOk = driveStore.banner != nil
+                && newUpcomingIdx61.map { driveStore.banner?.primary == newExpectedGuidance61[$0].primary } == true
+        } else {
+            bannerAfterReplanOk = driveStore.banner == nil
+        }
+        report(
+            "banner-after-replan", bannerAfterReplanOk,
+            "banner=\(String(describing: driveStore.banner)) newStepsPresent=\(newStepsPresent61)"
+        )
+        ok = ok && bannerAfterReplanOk
 
         driveStore.end()
         tripStore.confirmEndSoc(55)

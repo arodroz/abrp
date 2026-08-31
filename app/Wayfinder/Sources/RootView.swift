@@ -261,6 +261,13 @@ struct RootView: View {
 
     private var driveControlsOverlay: some View {
         VStack {
+            // Maneuver banner (wayfinder #67): nil whenever there's no upcoming guidance step
+            // (v1 pack) or guidance is muted (off-route-but-unreplanned, mid-replan).
+            if let banner = driveStore.banner {
+                ManeuverBannerView(banner: banner)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
+            }
             Spacer()
             HStack {
                 driveOverviewButton

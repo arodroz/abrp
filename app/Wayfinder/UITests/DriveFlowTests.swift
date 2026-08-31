@@ -103,6 +103,64 @@ final class DriveFlowTests: WayfinderUITestCase {
         XCTAssertTrue(waitForExistence(el("trip-record-button"), timeout: 10), "trip-record-button never appeared after End")
     }
 
+    /// The maneuver banner (wayfinder #67, ADR 0012 point 3's HUD extended to turn-by-turn
+    /// guidance): REQUIRES the sideloaded corridor pack to be v2 (guidance-attributed) -- a v1
+    /// pack has empty `steps` on every leg, so the banner never appears and this test fails by
+    /// design; the gate runs v2. `-simulatedDriveDistancesM` (DriveStore's e2e seam, mirroring
+    /// `-simulatedLocationFix`) feeds synthetic fixes at those along-route distances, 2.5 s
+    /// apart, since XCUITest can't inject CoreLocation fixes -- this is what actually drives the
+    /// banner countdown in the real UI, not a real drive. Six distances at that cadence keep the
+    /// fix train moving for ~15 s, so the countdown label still changes after this test's own
+    /// pre-read UI waits regardless of how many early fixes those waits swallowed.
+    func testManeuverBannerRendersAndUpdates() throws {
+        launchApp(extraLaunchArguments: [
+            "-simulatedLocationFix", "49.6116,6.1319", "-simulatedDriveDistancesM", "600;1200;1800;2400;3000;3600",
+        ])
+        XCTAssertTrue(planToRecent(named: "Antwerp"), "shared plan-to-recent flow failed setting up this test's plan")
+
+        XCTAssertTrue(
+            waitForExistence(el("go-button"), timeout: 15), "go button never appeared for a current-location-origin plan"
+        )
+        el("go-button").tap()
+
+        let startAlert = app.alerts["Trip start SoC"]
+        XCTAssertTrue(waitForExistence(startAlert, timeout: 10), "\"Trip start SoC\" alert never appeared after tapping Go")
+        startAlert.textFields.firstMatch.typeText("80")
+        startAlert.buttons["OK"].tap()
+        XCTAssertTrue(waitForNonexistence(startAlert, timeout: 5), "\"Trip start SoC\" alert is still up after OK")
+
+        XCTAssertTrue(waitForExistence(el("drive-end-button"), timeout: 10), "drive-end-button never appeared after tapping Go")
+
+        XCTAssertTrue(waitForExistence(el("maneuver-banner"), timeout: 15), "maneuver-banner never appeared -- requires a v2 (guidance) pack")
+
+        let distanceLabel = el("banner-distance")
+        XCTAssertTrue(waitForExistence(distanceLabel, timeout: 5), "banner-distance never appeared alongside the banner")
+        let initialDistance = distanceLabel.label
+
+        // The seam feeds fixes 0.7 s apart -- poll for the countdown label to change.
+        var distanceChanged = false
+        let deadline = Date().addingTimeInterval(10)
+        while Date() < deadline {
+            if distanceLabel.label != initialDistance {
+                distanceChanged = true
+                break
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        }
+        XCTAssertTrue(distanceChanged, "banner-distance never changed while the drive seam fed fixes")
+
+        el("drive-end-button").tap()
+
+        // Same idiom as testGoEntersAndEndExitsDrive: Cancel deliberately, no tlog file left
+        // behind for other suites.
+        let endAlert = app.alerts["Trip end SoC"]
+        XCTAssertTrue(waitForExistence(endAlert, timeout: 10), "\"Trip end SoC\" alert never appeared after tapping End")
+        endAlert.buttons["Cancel"].tap()
+        XCTAssertTrue(waitForNonexistence(endAlert, timeout: 5), "\"Trip end SoC\" alert is still up after Cancel")
+
+        XCTAssertTrue(waitForNonexistence(el("maneuver-banner"), timeout: 10), "maneuver-banner still present after End")
+    }
+
     /// The Go gate is provenance-based (ADR 0012 point 2): a long-press origin is by definition
     /// not the current location, so it must close the gate even though a plan still exists.
     func testNoGoOnRemoteOriginPlan() throws {
