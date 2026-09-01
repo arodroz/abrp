@@ -16,26 +16,45 @@ import UIKit
 enum RouteLayer {
     private static let routeSourceId = "route"
     private static let stopsSourceId = "stops"
+    private static let connectorSourceId = "route-connector"
     static let routeLineId = "route-line"
     private static let routeLineTopId = "route-line-top"
     static let stopsCirclesId = "stops-circles"
     private static let stopsLabelsId = "stops-labels"
+    private static let connectorLineId = "route-connector"
 
-    static func addLayers(to style: MLNStyle, plan: FfiPlan) {
-        for id in [routeLineId, routeLineTopId, stopsCirclesId, stopsLabelsId] {
+    /// `origin`/`destination`, when given, trim the drawn polyline to start/end at the pin
+    /// rather than the snapped routing-graph junction node (RouteGeometry.trimmedDisplayPolyline,
+    /// wayfinder #84) and draw a dashed connector stub over any remaining gap -- display only,
+    /// `plan.polyline` itself is untouched (DriveStore/RouteSnap/StepTracker need the raw one).
+    static func addLayers(
+        to style: MLNStyle, plan: FfiPlan, origin: CLLocationCoordinate2D? = nil,
+        destination: CLLocationCoordinate2D? = nil
+    ) {
+        for id in [routeLineId, routeLineTopId, stopsCirclesId, stopsLabelsId, connectorLineId] {
             if let layer = style.layer(withIdentifier: id) { style.removeLayer(layer) }
         }
-        for id in [routeSourceId, stopsSourceId] {
+        for id in [routeSourceId, stopsSourceId, connectorSourceId] {
             if let source = style.source(withIdentifier: id) { style.removeSource(source) }
         }
 
         guard !plan.polyline.isEmpty else { return }
 
+        let fullPolyline = plan.polyline.map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
+        var displayCoordinates = fullPolyline
+        var connectors: [[CLLocationCoordinate2D]] = []
+        if let origin, let destination {
+            let trimmed = RouteGeometry.trimmedDisplayPolyline(fullPolyline, origin: origin, destination: destination)
+            displayCoordinates = trimmed.display
+            if let originConnector = trimmed.originConnector { connectors.append(originConnector) }
+            if let destinationConnector = trimmed.destinationConnector { connectors.append(destinationConnector) }
+        }
+
         let routeGeojson: [String: Any] = [
             "type": "Feature",
             "geometry": [
                 "type": "LineString",
-                "coordinates": plan.polyline.map { [$0.lon, $0.lat] },
+                "coordinates": displayCoordinates.map { [$0.longitude, $0.latitude] },
             ],
         ]
         guard let routeData = try? JSONSerialization.data(withJSONObject: routeGeojson),
@@ -59,6 +78,34 @@ enum RouteLayer {
         routeLineTop.lineJoin = NSExpression(forConstantValue: "round")
         routeLineTop.lineCap = NSExpression(forConstantValue: "round")
         style.addLayer(routeLineTop)
+
+        if !connectors.isEmpty {
+            let connectorFeatures: [[String: Any]] = connectors.map { connector in
+                [
+                    "type": "Feature",
+                    "geometry": [
+                        "type": "LineString",
+                        "coordinates": connector.map { [$0.longitude, $0.latitude] },
+                    ],
+                ]
+            }
+            let connectorFC: [String: Any] = ["type": "FeatureCollection", "features": connectorFeatures]
+            if let connectorData = try? JSONSerialization.data(withJSONObject: connectorFC),
+               let connectorShape = try? MLNShape(data: connectorData, encoding: String.Encoding.utf8.rawValue) {
+                let connectorSource = MLNShapeSource(identifier: connectorSourceId, shape: connectorShape, options: nil)
+                style.addSource(connectorSource)
+
+                // Google-Maps-style dotted stub from pin to road.
+                let connectorLine = MLNLineStyleLayer(identifier: connectorLineId, source: connectorSource)
+                connectorLine.lineWidth = NSExpression(forConstantValue: 3.0)
+                connectorLine.lineColor = NSExpression(forConstantValue: UIColor.systemBlue)
+                connectorLine.lineOpacity = NSExpression(forConstantValue: 0.7)
+                connectorLine.lineDashPattern = NSExpression(forConstantValue: [1.5, 1.5])
+                connectorLine.lineCap = NSExpression(forConstantValue: "round")
+                connectorLine.lineJoin = NSExpression(forConstantValue: "round")
+                style.addLayer(connectorLine)
+            }
+        }
 
         let stopFeatures: [[String: Any]] = plan.stops.map { stop in
             [
@@ -96,8 +143,13 @@ enum RouteLayer {
         style.addLayer(stopsLabels)
     }
 
-    /// Fits the camera to the plan's polyline bounds.
-    static func fitToRoute(mapView: MLNMapView, plan: FfiPlan) {
+    /// Fits the camera to the plan's full, untrimmed polyline bounds (plus `origin`/
+    /// `destination`, if given, in case a display trim would otherwise pull the bounds in from
+    /// the actual pin).
+    static func fitToRoute(
+        mapView: MLNMapView, plan: FfiPlan, origin: CLLocationCoordinate2D? = nil,
+        destination: CLLocationCoordinate2D? = nil
+    ) {
         guard !plan.polyline.isEmpty else { return }
         var minLat = plan.polyline[0].lat
         var maxLat = minLat
@@ -108,6 +160,12 @@ enum RouteLayer {
             maxLat = max(maxLat, p.lat)
             minLon = min(minLon, p.lon)
             maxLon = max(maxLon, p.lon)
+        }
+        for coordinate in [origin, destination].compactMap({ $0 }) {
+            minLat = min(minLat, coordinate.latitude)
+            maxLat = max(maxLat, coordinate.latitude)
+            minLon = min(minLon, coordinate.longitude)
+            maxLon = max(maxLon, coordinate.longitude)
         }
         let bounds = MLNCoordinateBoundsMake(
             CLLocationCoordinate2D(latitude: minLat, longitude: minLon),

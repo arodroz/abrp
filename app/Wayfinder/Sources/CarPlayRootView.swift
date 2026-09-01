@@ -168,9 +168,11 @@ struct CarPlayMapView: UIViewRepresentable {
         // plan lands anyway.
         if coordinator.styleLoaded, planVersion != coordinator.lastRenderedPlanVersion {
             if let style = mapView.style, let displayedPlan {
-                RouteLayer.addLayers(to: style, plan: displayedPlan)
+                let origin = planStore.originCoordinate
+                let destination = planStore.destination?.coordinate
+                RouteLayer.addLayers(to: style, plan: displayedPlan, origin: origin, destination: destination)
                 if phase == .idle {
-                    RouteLayer.fitToRoute(mapView: mapView, plan: displayedPlan)
+                    RouteLayer.fitToRoute(mapView: mapView, plan: displayedPlan, origin: origin, destination: destination)
                 }
             }
             coordinator.lastRenderedPlanVersion = planVersion
@@ -230,9 +232,11 @@ struct CarPlayMapView: UIViewRepresentable {
             // screen) showing a bare map until some store property happens to change. Draw here
             // directly instead, the same way PlanStore's own didFinishLoading re-adds its layers.
             if let plan = planStore.displayedPlan {
-                RouteLayer.addLayers(to: style, plan: plan)
+                let origin = planStore.originCoordinate
+                let destination = planStore.destination?.coordinate
+                RouteLayer.addLayers(to: style, plan: plan, origin: origin, destination: destination)
                 if driveStore.phase == .idle {
-                    RouteLayer.fitToRoute(mapView: mapView, plan: plan)
+                    RouteLayer.fitToRoute(mapView: mapView, plan: plan, origin: origin, destination: destination)
                 }
             } else {
                 // No plan to frame: adopt the phone map's current camera instead of stranding

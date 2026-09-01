@@ -392,9 +392,11 @@ final class PlanStore: NSObject, @preconcurrency MLNMapViewDelegate, @preconcurr
         guard let client else { throw PlanStoreError.plannerNotReady }
         let plan = try await client.plan(request)
         self.plan = plan
+        let origin = CLLocationCoordinate2D(latitude: request.originLat, longitude: request.originLon)
+        let destination = CLLocationCoordinate2D(latitude: request.destLat, longitude: request.destLon)
         if let style = mapView.style {
-            RouteLayer.addLayers(to: style, plan: plan)
-            RouteLayer.fitToRoute(mapView: mapView, plan: plan)
+            RouteLayer.addLayers(to: style, plan: plan, origin: origin, destination: destination)
+            RouteLayer.fitToRoute(mapView: mapView, plan: plan, origin: origin, destination: destination)
         }
         return plan
     }
@@ -409,7 +411,9 @@ final class PlanStore: NSObject, @preconcurrency MLNMapViewDelegate, @preconcurr
         showingAlternative.toggle()
         selectedDistanceM = nil
         if let style = mapView.style, let displayedPlan {
-            RouteLayer.addLayers(to: style, plan: displayedPlan)
+            RouteLayer.addLayers(
+                to: style, plan: displayedPlan, origin: originCoordinate, destination: destination?.coordinate
+            )
         }
     }
 
@@ -594,7 +598,7 @@ final class PlanStore: NSObject, @preconcurrency MLNMapViewDelegate, @preconcurr
         isStyleLoaded = true
         addChargersLayerIfPossible()
         if let plan {
-            RouteLayer.addLayers(to: style, plan: plan)
+            RouteLayer.addLayers(to: style, plan: plan, origin: originCoordinate, destination: destination?.coordinate)
         }
         setInitialCameraIfNeeded()
     }
@@ -758,7 +762,9 @@ final class PlanStore: NSObject, @preconcurrency MLNMapViewDelegate, @preconcurr
             showingAlternative = false
             selectedDistanceM = nil
             if let style = mapView.style {
-                RouteLayer.addLayers(to: style, plan: result)
+                RouteLayer.addLayers(
+                    to: style, plan: result, origin: originCoordinate, destination: destination.coordinate
+                )
             }
             planVersion += 1
             isPlanning = false

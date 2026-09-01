@@ -245,14 +245,89 @@ pub fn ffi_plan_of(
     }
 }
 
+/// Distance in metres from `p` to the SEGMENT `a`-`b` (projection clamped to
+/// the segment, not the infinite line: on looping geometry -- a cloverleaf
+/// ramp, a hairpin -- a point can sit far past the chord's ends yet nearly
+/// collinear with it, and line distance would call that zero and let DP drop
+/// it), using an equirectangular approximation (`cos(mean lat)` scaling of
+/// longitude) -- accurate enough at the few-metre tolerances this is used
+/// at. Degenerate `a == b` falls back to straight-line distance to `a`.
+fn perpendicular_distance_m(p: &FfiGeoPoint, a: &FfiGeoPoint, b: &FfiGeoPoint) -> f64 {
+    const M_PER_DEG_LAT: f64 = 111_320.0;
+    let mean_lat_rad = ((a.lat + b.lat) / 2.0).to_radians();
+    let cos_lat = mean_lat_rad.cos();
+    let m_per_deg_lon = M_PER_DEG_LAT * cos_lat;
+
+    let ax = a.lon * m_per_deg_lon;
+    let ay = a.lat * M_PER_DEG_LAT;
+    let bx = b.lon * m_per_deg_lon;
+    let by = b.lat * M_PER_DEG_LAT;
+    let px = p.lon * m_per_deg_lon;
+    let py = p.lat * M_PER_DEG_LAT;
+
+    let dx = bx - ax;
+    let dy = by - ay;
+    let len_sq = dx * dx + dy * dy;
+    if len_sq == 0.0 {
+        return ((px - ax).powi(2) + (py - ay).powi(2)).sqrt();
+    }
+
+    let t = (((px - ax) * dx + (py - ay) * dy) / len_sq).clamp(0.0, 1.0);
+    let cx = ax + t * dx;
+    let cy = ay + t * dy;
+    ((px - cx).powi(2) + (py - cy).powi(2)).sqrt()
+}
+
+/// Douglas-Peucker simplification at `tolerance_m` metres, iterative (an
+/// explicit stack of index ranges rather than recursion, so a long Leg's
+/// point list can't blow the stack). Always keeps `points`' first and last
+/// vertex.
+fn simplify_dp(points: &[FfiGeoPoint], tolerance_m: f64) -> Vec<FfiGeoPoint> {
+    if points.len() < 3 {
+        return points.to_vec();
+    }
+
+    // `keep[i]` marks whether `points[i]` survives simplification.
+    let mut keep = vec![false; points.len()];
+    keep[0] = true;
+    keep[points.len() - 1] = true;
+
+    let mut stack: Vec<(usize, usize)> = vec![(0, points.len() - 1)];
+    while let Some((start, end)) = stack.pop() {
+        if end <= start + 1 {
+            continue;
+        }
+        let (mut split_idx, mut max_dist) = (0usize, 0.0f64);
+        for i in (start + 1)..end {
+            let dist = perpendicular_distance_m(&points[i], &points[start], &points[end]);
+            if dist > max_dist {
+                max_dist = dist;
+                split_idx = i;
+            }
+        }
+        if max_dist >= tolerance_m {
+            keep[split_idx] = true;
+            stack.push((start, split_idx));
+            stack.push((split_idx, end));
+        }
+    }
+
+    points
+        .iter()
+        .zip(keep)
+        .filter_map(|(p, k)| k.then_some(*p))
+        .collect()
+}
+
 /// Concatenates each Leg's `route_edges` geometry (dropping the duplicated
-/// junction vertex between consecutive edges within a Leg), downsampled to
-/// ~every 5th point while always keeping each Leg's first and last vertex,
-/// to bound the `RustBuffer` (ADR 0004 point 3). Needs `&Rpack`, so unlike
-/// the rest of this module it is exercised by the Swift golden test rather
-/// than a Rust unit test.
+/// junction vertex between consecutive edges within a Leg), simplified with
+/// Douglas-Peucker at a 3 m tolerance -- applied per Leg so Leg boundaries
+/// (Charging Stops, Waypoints) stay exact -- to bound the `RustBuffer` (ADR
+/// 0004 point 3) with an actual geometric error guarantee instead of index
+/// decimation. Needs `&Rpack`, so unlike the rest of this module it is
+/// exercised by the Swift golden test rather than a Rust unit test.
 pub fn build_polyline(pack: &Rpack, plan: &Plan) -> Vec<FfiGeoPoint> {
-    const KEEP_EVERY: usize = 5;
+    const SIMPLIFY_TOLERANCE_M: f64 = 3.0;
     let mut out: Vec<FfiGeoPoint> = Vec::new();
 
     for leg in &plan.legs {
@@ -271,13 +346,10 @@ pub fn build_polyline(pack: &Rpack, plan: &Plan) -> Vec<FfiGeoPoint> {
                 });
             }
         }
-        let Some(last_idx) = leg_pts.len().checked_sub(1) else {
+        if leg_pts.is_empty() {
             continue;
-        };
-        for (i, p) in leg_pts.into_iter().enumerate() {
-            if i != 0 && i != last_idx && i % KEEP_EVERY != 0 {
-                continue;
-            }
+        }
+        for p in simplify_dp(&leg_pts, SIMPLIFY_TOLERANCE_M) {
             if out.last() == Some(&p) {
                 continue;
             }
@@ -531,6 +603,170 @@ mod tests {
                 }
             }
             prev = Some(p.soc);
+        }
+    }
+
+    #[test]
+    fn simplify_dp_preserves_endpoints() {
+        let points = vec![
+            FfiGeoPoint {
+                lat: 50.0000,
+                lon: 5.0000,
+            },
+            FfiGeoPoint {
+                lat: 50.0001,
+                lon: 5.0005,
+            },
+            FfiGeoPoint {
+                lat: 50.0002,
+                lon: 5.0010,
+            },
+            FfiGeoPoint {
+                lat: 50.0100,
+                lon: 5.0200,
+            },
+        ];
+        let simplified = simplify_dp(&points, 3.0);
+        assert_eq!(simplified.first(), points.first());
+        assert_eq!(simplified.last(), points.last());
+    }
+
+    #[test]
+    fn simplify_dp_collapses_collinear_points_to_two() {
+        // Points on an exact straight line (constant lat): zero perpendicular
+        // distance from every intermediate point to the endpoint-to-endpoint line.
+        let points: Vec<FfiGeoPoint> = (0..10)
+            .map(|i| FfiGeoPoint {
+                lat: 50.0,
+                lon: 5.0 + i as f64 * 0.001,
+            })
+            .collect();
+        let simplified = simplify_dp(&points, 3.0);
+        assert_eq!(simplified, vec![points[0], points[9]]);
+    }
+
+    #[test]
+    fn simplify_dp_keeps_a_right_angle_corner_at_any_tolerance_up_to_its_offset() {
+        let a = FfiGeoPoint {
+            lat: 50.0,
+            lon: 5.00,
+        };
+        let corner = FfiGeoPoint {
+            lat: 50.00018,
+            lon: 5.005,
+        };
+        let c = FfiGeoPoint {
+            lat: 50.0,
+            lon: 5.02,
+        };
+        let points = vec![a, corner, c];
+
+        let offset_m = perpendicular_distance_m(&corner, &a, &c);
+        assert!(
+            offset_m > 1.0,
+            "test fixture's corner offset should be well above float noise: {offset_m}"
+        );
+
+        // Tolerance exactly at the corner's own offset: the ">=" split threshold
+        // means it still survives.
+        let simplified = simplify_dp(&points, offset_m);
+        assert_eq!(
+            simplified, points,
+            "corner should survive when tolerance == its own offset"
+        );
+
+        // And at any tighter tolerance too.
+        let simplified_tighter = simplify_dp(&points, offset_m * 0.5);
+        assert_eq!(
+            simplified_tighter, points,
+            "corner should survive at a tighter tolerance too"
+        );
+    }
+
+    #[test]
+    fn simplify_dp_keeps_a_collinear_overshoot_hairpin() {
+        // An out-and-back collinear with the chord (a hairpin overshooting past the
+        // endpoint): zero distance to the INFINITE line through the endpoints, so
+        // line-based DP would drop it -- segment-clamped distance must keep it.
+        let a = FfiGeoPoint {
+            lat: 50.0,
+            lon: 5.000,
+        };
+        let overshoot = FfiGeoPoint {
+            lat: 50.0,
+            lon: 5.003,
+        };
+        let b = FfiGeoPoint {
+            lat: 50.0,
+            lon: 5.001,
+        };
+        let simplified = simplify_dp(&[a, overshoot, b], 3.0);
+        assert_eq!(
+            simplified,
+            vec![a, overshoot, b],
+            "a collinear overshoot past the chord's end must survive simplification"
+        );
+    }
+
+    #[test]
+    fn simplify_dp_dropped_points_deviate_no_more_than_tolerance() {
+        const TOLERANCE_M: f64 = 3.0;
+        // A synthetic zigzag: small lat wiggles (sub-tolerance) alternating with
+        // one large excursion that must survive simplification.
+        let points: Vec<FfiGeoPoint> = vec![
+            FfiGeoPoint {
+                lat: 50.000000,
+                lon: 5.0000,
+            },
+            FfiGeoPoint {
+                lat: 50.000005,
+                lon: 5.0010,
+            }, // ~0.56m wiggle
+            FfiGeoPoint {
+                lat: 50.000000,
+                lon: 5.0020,
+            },
+            FfiGeoPoint {
+                lat: 50.000200,
+                lon: 5.0030,
+            }, // ~22m excursion, must survive
+            FfiGeoPoint {
+                lat: 50.000000,
+                lon: 5.0040,
+            },
+            FfiGeoPoint {
+                lat: 50.000004,
+                lon: 5.0050,
+            }, // ~0.45m wiggle
+            FfiGeoPoint {
+                lat: 50.000000,
+                lon: 5.0060,
+            },
+        ];
+        let simplified = simplify_dp(&points, TOLERANCE_M);
+
+        assert_eq!(simplified.first(), points.first());
+        assert_eq!(simplified.last(), points.last());
+        assert!(
+            simplified.contains(&points[3]),
+            "the large excursion must survive simplification"
+        );
+
+        // Every dropped point must deviate no more than TOLERANCE_M from the
+        // line segment connecting its enclosing surviving neighbors.
+        let mut seg = 0usize;
+        for p in &points {
+            if seg + 1 < simplified.len() && *p == simplified[seg + 1] {
+                seg += 1;
+            }
+            if seg + 1 >= simplified.len() {
+                break;
+            }
+            let dist = perpendicular_distance_m(p, &simplified[seg], &simplified[seg + 1]);
+            assert!(
+                dist <= TOLERANCE_M + 1e-9,
+                "point {p:?} deviates {dist}m from its enclosing simplified segment (tolerance {TOLERANCE_M}m)"
+            );
         }
     }
 }

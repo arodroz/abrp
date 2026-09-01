@@ -116,10 +116,18 @@ extension Autotest {
         let planLandedOk = await waitWithTimeout(seconds: 30) { planStore.plan != nil }
         report("plan-landed", planLandedOk)
         ok = ok && planLandedOk
-        guard planLandedOk, let polyline = planStore.displayedPlan?.polyline, polyline.count >= 51 else {
-            report("trail-seam", false, "polyline too short for this smoke's fixed indices")
+        guard planLandedOk, let polyline = planStore.displayedPlan?.polyline, polyline.count >= 2 else {
+            report("trail-seam", false, "polyline too short for this smoke")
             await finish(ok: false)
         }
+        // The second fix's index is picked by fraction of the route's total cumulative distance
+        // rather than a fixed index -- the DP-simplified polyline's vertex density varies by
+        // geometry (wayfinder #84), unlike the old constant-stride decimation's.
+        let cumulativeSoc = RouteSnap.cumulativeDistances(
+            polyline.map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
+        )
+        let secondFixIndex = cumulativeSoc.firstIndex(where: { $0 >= (cumulativeSoc.last ?? 0) * 0.2 })
+            ?? (polyline.count - 1)
 
         driveStore.go()
         tripStore.confirmStartSoc(80)
@@ -144,7 +152,7 @@ extension Autotest {
 
         // A fresh reading lands with the very next fix.
         telemetryStore.setSyntheticDisplaySoc(75)
-        driveStore.ingest(fix(at: 50))
+        driveStore.ingest(fix(at: secondFixIndex))
         let appendedOk = driveStore.socTrail.count == 1 && driveStore.socTrail.first?.socPct == 75
         report("fresh-reading-appends", appendedOk, "socTrail=\(driveStore.socTrail)")
         ok = ok && appendedOk

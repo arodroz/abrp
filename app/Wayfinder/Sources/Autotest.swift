@@ -97,6 +97,12 @@
 // rather than a full scripted engine dialogue. `chart-demo-plan`/`chart-demo-drive` (same file)
 // are visual-verification-only: they stage the overhauled chart in the result card / drive HUD
 // and print a READY line instead of finishing, for the reviewer's own screenshot.
+// `--autotest route-geometry-smoke` (wayfinder #84, in AutotestRouteGeometry.swift) asserts
+// RouteGeometry's pure functions directly, no UI: a synthetic straight polyline's origin/
+// destination trim-to-projection at <=50m perpendicular, no trim past that, the dashed
+// connector's >10m/<=10m gap threshold at both ends, and a degenerate 2-point polyline left
+// untouched. `map-demo-route` (same file) is visual-verification-only, like the chart-demo pair:
+// stages the golden plan fitted to its first ~3km at a road-following zoom and prints READY.
 import CoreLocation
 import CryptoKit
 import Darwin
@@ -178,6 +184,14 @@ enum Autotest {
         case "chart-demo-drive":
             Task.detached(priority: .userInitiated) {
                 await runChartDemoDrive(store: store, tripStore: tripStore, driveStore: driveStore, telemetryStore: telemetryStore)
+            }
+        case "route-geometry-smoke":
+            Task.detached(priority: .userInitiated) {
+                await runRouteGeometrySmoke()
+            }
+        case "map-demo-route":
+            Task.detached(priority: .userInitiated) {
+                await runMapDemoRoute(store: store)
             }
         default:
             break
@@ -1668,13 +1682,31 @@ enum Autotest {
         )
         ok = ok && enterOk
 
-        guard let polyline = store.displayedPlan?.polyline, polyline.count >= 102 else {
-            report("snap-on-route", false, "polyline too short for this smoke's fixed indices")
+        guard let polyline = store.displayedPlan?.polyline, polyline.count >= 3 else {
+            report("snap-on-route", false, "polyline too short for this smoke")
             await finish(ok: false)
+        }
+        // Vertices picked by FRACTION of the route's total cumulative distance rather than a
+        // fixed index or a fixed distance -- the DP-simplified polyline's vertex density varies
+        // by geometry (wayfinder #84), unlike the old constant-stride decimation's, so a fixed
+        // small distance risks landing on the very same long straight-highway vertex twice; wide
+        // fractional spacing avoids that regardless of the route's total length.
+        let cumulative6 = RouteSnap.cumulativeDistances(
+            polyline.map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
+        )
+        guard let routeTotalM6 = cumulative6.last, routeTotalM6 > 0 else {
+            report("snap-on-route", false, "polyline has zero length")
+            await finish(ok: false)
+        }
+        func vertexIndex(nearestFractionOfTotal fraction: Double) -> Int {
+            cumulative6.firstIndex(where: { $0 >= routeTotalM6 * fraction }) ?? (polyline.count - 1)
         }
 
         // Step 6: three exact-vertex fixes -- on-route snap + strictly-increasing progress.
-        let vertexIndices = [0, min(50, polyline.count - 1), min(100, polyline.count - 1)]
+        let vertexIndices = [
+            vertexIndex(nearestFractionOfTotal: 0.0), vertexIndex(nearestFractionOfTotal: 0.2),
+            vertexIndex(nearestFractionOfTotal: 0.4),
+        ]
         var onRouteOks: [Bool] = []
         var snapCloseOks: [Bool] = []
         var progressValues: [Double] = []
@@ -1704,14 +1736,27 @@ enum Autotest {
         report("progress-monotonic", progressMonotonicOk, "progress=\(progressValues)")
         ok = ok && progressMonotonicOk
 
-        // Step 7: a small (~6 m) perpendicular offset from segment [~50]'s midpoint should
-        // still snap on-route, pulled in 3-10 m from the raw fix.
-        let segIdx = min(50, polyline.count - 2)
+        // Step 7: a small (~6 m) perpendicular offset from a segment near 30% of the route's
+        // total distance should still snap on-route, pulled in 3-10 m from the raw fix. The
+        // offset is computed perpendicular to the ACTUAL segment bearing (the same normal-vector
+        // math as step 12's off-route offset below) rather than a bare latitude nudge -- the
+        // DP-simplified polyline's segment orientation varies by location, unlike the old
+        // constant-stride decimation's.
+        let segIdx = min(vertexIndex(nearestFractionOfTotal: 0.3), polyline.count - 2)
         let a = polyline[segIdx]
         let b = polyline[segIdx + 1]
         let midLat = (a.lat + b.lat) / 2
         let midLon = (a.lon + b.lon) / 2
-        let smallOffsetCoordinate = CLLocationCoordinate2D(latitude: midLat + 0.000054, longitude: midLon)
+        let cosMidLat = cos(midLat * .pi / 180)
+        let vx = b.lon * cosMidLat - a.lon * cosMidLat
+        let vy = b.lat - a.lat
+        let vLen = (vx * vx + vy * vy).squareRoot()
+        let nx = -vy / vLen
+        let ny = vx / vLen
+        let smallOffsetCoordinate = CLLocationCoordinate2D(
+            latitude: midLat + (6.0 / 111_320.0) * ny,
+            longitude: midLon + (6.0 / 111_320.0) * nx / cosMidLat
+        )
         driveStore.ingest(CLLocation(
             coordinate: smallOffsetCoordinate, altitude: 300, horizontalAccuracy: 5, verticalAccuracy: 5,
             course: -1, speed: -1, timestamp: Date()
@@ -1730,8 +1775,11 @@ enum Autotest {
         )
         ok = ok && snapPullsInOk
 
-        // Step 8: a far (~300 m) offset from the same midpoint should stay raw, off-route.
-        let farOffsetCoordinate = CLLocationCoordinate2D(latitude: midLat + 0.002695, longitude: midLon)
+        // Step 8: a far (~300 m) offset from the same segment should stay raw, off-route.
+        let farOffsetCoordinate = CLLocationCoordinate2D(
+            latitude: midLat + (300.0 / 111_320.0) * ny,
+            longitude: midLon + (300.0 / 111_320.0) * nx / cosMidLat
+        )
         driveStore.ingest(CLLocation(
             coordinate: farOffsetCoordinate, altitude: 300, horizontalAccuracy: 5, verticalAccuracy: 5,
             course: -1, speed: -1, timestamp: Date()
@@ -2178,7 +2226,7 @@ enum Autotest {
         let cumulative61 = RouteSnap.cumulativeDistances(
             plan61.polyline.map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
         )
-        guard let vertexIdx61 = cumulative61.firstIndex(where: { $0 >= 2000 }), vertexIdx61 + 1 < plan61.polyline.count else {
+        guard let vertexIdx61 = cumulative61.firstIndex(where: { $0 >= 10_000 }), vertexIdx61 + 1 < plan61.polyline.count else {
             report("offroute-noise", false, "polyline too short for step 12's offset")
             await finish(ok: false)
         }
