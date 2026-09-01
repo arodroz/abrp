@@ -38,6 +38,10 @@
 // the banner reads -- muted by the IDENTICAL shared gate (banner nil <=> voice frozen), and
 // logged to `voiceEventLog` as a test seam that's appended to ALWAYS, mute or not, so muting
 // only silences `SpeechController`, never the assertable log.
+//
+// Live SoC (wayfinder #79): the 12V-safety gate's only writers are `enterDrive` (opens) and the
+// two ways a drive ends -- `end()` and the arrival branch in `ingest` (both close). Closing
+// always happens AFTER trip capture closes -- see the ordering comment in `end()`.
 import CoreLocation
 import Foundation
 import MapLibre
@@ -148,6 +152,9 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
 
     private let planStore: PlanStore
     private let tripStore: TripLogStore
+    /// The 12V-safety gate this drive opens/closes (wayfinder #79): `nil` only in contexts that
+    /// don't wire telemetry up at all. See `enterDrive`/`end`.
+    private let telemetryStore: TelemetryLinkStore?
     private let locationManager = CLLocationManager()
     private var routePolyline: [CLLocationCoordinate2D] = []
     private var routeCumulativeM: [Double] = []
@@ -186,9 +193,10 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
     private static let offRouteThresholdM = 50.0
     private static let offRouteSustainedS = 5.0
 
-    init(planStore: PlanStore, tripStore: TripLogStore) {
+    init(planStore: PlanStore, tripStore: TripLogStore, telemetryStore: TelemetryLinkStore?) {
         self.planStore = planStore
         self.tripStore = tripStore
+        self.telemetryStore = telemetryStore
         super.init()
         locationManager.delegate = self
         planStore.onUserMapGesture = { [weak self] in self?.noteUserGesture() }
@@ -229,6 +237,9 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
     /// for what it deliberately leaves untouched), plus this method's own phase-entry work.
     private func enterDrive() {
         guard canGo, let plan = planStore.displayedPlan else { return }
+
+        // 12V-safety gate (wayfinder #79): only ever open while actually driving.
+        telemetryStore?.gateOpen = true
 
         // Flags reset BEFORE snapshotPlan (wayfinder #67): snapshotPlan now computes the initial
         // banner, and computeBanner mutes while `replanInFlight` -- a drive entered right after a
@@ -339,6 +350,10 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
         banner = nil
         phase = .idle
         if tripStore.phase == .recording { tripStore.stopTapped() }
+        // 12V-safety gate (wayfinder #79): closed the moment the drive ends -- but AFTER capture
+        // closes, because closing the gate wipes `latestReadings` and the end-of-trip telemetry
+        // snapshot (wayfinder #80) must still be able to read them inside `stopTapped`.
+        telemetryStore?.gateOpen = false
     }
 
     // MARK: Fix ingestion
@@ -379,6 +394,11 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
             lastHudFixTimestamp = location.timestamp
             locationManager.stopUpdatingLocation()
             if tripStore.phase == .recording { tripStore.stopTapped() }
+            // 12V-safety gate (wayfinder #79): arrival is as much an end as tapping End -- a
+            // parked car must not keep the gate open through an indefinite `.arrived` dwell
+            // (backoff retries would poke the sleeping car's adapter forever). After capture
+            // closes, same ordering constraint as `end()`.
+            telemetryStore?.gateOpen = false
             // Voice guidance (wayfinder #68): the arrive step's own `.now` tier at <=40 m races
             // this ~40 m arrival cutover and loses -- this branch returns before the scheduler
             // below ever runs -- so arrival speaks explicitly instead.

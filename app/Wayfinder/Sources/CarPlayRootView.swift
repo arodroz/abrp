@@ -5,6 +5,10 @@
 // renders to its own screen/window), kept in sync by copying styleURL, route layers, and the
 // drive puck across on every observed change -- see its Coordinator/updateUIView comments for
 // the exact sync rules.
+//
+// Live SoC chip (wayfinder #79): the same `LiveSocPresentation` DriveCard uses, read off the SAME
+// `telemetryStore` instance (CarPlaySceneDelegate hands it over, like planStore/driveStore) --
+// never a second store, so the two screens can never disagree.
 import CoreLocation
 import MapLibre
 import SwiftUI
@@ -13,6 +17,7 @@ import os
 struct CarPlayRootView: View {
     let planStore: PlanStore
     let driveStore: DriveStore
+    let telemetryStore: TelemetryLinkStore
 
     var body: some View {
         ZStack {
@@ -60,11 +65,40 @@ struct CarPlayRootView: View {
             .font(.subheadline)
             .foregroundColor(.secondary)
             .lineLimit(1)
+            TimelineView(.periodic(from: .now, by: 5)) { context in
+                liveSocChip(LiveSocPresentation.compute(
+                    soc: telemetryStore.liveDisplaySoc,
+                    age: telemetryStore.lastReadingAt.map { context.date.timeIntervalSince($0) }
+                ))
+            }
         }
         .padding(16)
         .background(.regularMaterial)
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .shadow(color: .black.opacity(0.2), radius: 10, y: 4)
+    }
+
+    @ViewBuilder
+    private func liveSocChip(_ presentation: LiveSocPresentation) -> some View {
+        switch presentation {
+        case .hidden:
+            EmptyView()
+        case .fresh(let soc):
+            liveSocLabel(soc, color: .primary, opacity: 1.0)
+        case .stale(let soc):
+            liveSocLabel(soc, color: .secondary, opacity: 0.5)
+        }
+    }
+
+    private func liveSocLabel(_ soc: Double, color: Color, opacity: Double) -> some View {
+        HStack(spacing: 3) {
+            Image(systemName: "antenna.radiowaves.left.and.right")
+            Text(formatLiveSocPct(soc))
+        }
+        .font(.subheadline.bold())
+        .foregroundColor(color)
+        .opacity(opacity)
+        .accessibilityIdentifier("drive-live-soc")
     }
 
     /// "HH:mm", identical to DriveCard's own `formatClock`.

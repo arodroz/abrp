@@ -7,11 +7,17 @@
 // a separate view rather than reusing ResultCard directly, since the drive HUD's fields
 // (ETA/remaining/next-stop) don't map onto ResultCard's plan-summary layout, which is hidden
 // entirely while driving.
+//
+// Live SoC chip (wayfinder #79): beside the predicted-SoC button, reads `telemetryStore`'s
+// decoded Display SoC through `LiveSocPresentation` -- hidden with no reading yet, `.primary`
+// while fresh, dimmed `.secondary` once stale. Wrapped in a `TimelineView` so the fresh->stale
+// flip happens on wall-clock time alone, not just when a new poll happens to land.
 import SwiftUI
 
 struct DriveCard: View {
     let store: PlanStore
     let driveStore: DriveStore
+    let telemetryStore: TelemetryLinkStore
     let onSocTap: () -> Void
 
     var body: some View {
@@ -70,6 +76,12 @@ struct DriveCard: View {
                 .padding(8)
             }
             .accessibilityIdentifier("drive-soc-button")
+            TimelineView(.periodic(from: .now, by: 5)) { context in
+                liveSocChip(LiveSocPresentation.compute(
+                    soc: telemetryStore.liveDisplaySoc,
+                    age: telemetryStore.lastReadingAt.map { context.date.timeIntervalSince($0) }
+                ))
+            }
             Button {
                 withAnimation(.spring()) { driveStore.driveCardExpanded.toggle() }
             } label: {
@@ -91,4 +103,35 @@ struct DriveCard: View {
         formatter.dateFormat = "HH:mm"
         return formatter.string(from: date)
     }
+
+    @ViewBuilder
+    private func liveSocChip(_ presentation: LiveSocPresentation) -> some View {
+        switch presentation {
+        case .hidden:
+            EmptyView()
+        case .fresh(let soc):
+            liveSocLabel(soc, color: .primary, opacity: 1.0)
+        case .stale(let soc):
+            liveSocLabel(soc, color: .secondary, opacity: 0.5)
+        }
+    }
+
+    private func liveSocLabel(_ soc: Double, color: Color, opacity: Double) -> some View {
+        HStack(spacing: 3) {
+            Image(systemName: "antenna.radiowaves.left.and.right")
+            Text(formatLiveSocPct(soc))
+        }
+        .font(.subheadline.bold())
+        .foregroundColor(color)
+        .opacity(opacity)
+        .padding(8)
+        .accessibilityIdentifier("drive-live-soc")
+    }
+}
+
+/// `latestReadings` values are already percent (0-100), unlike `formatSocPct`'s fraction input
+/// (PlannerModels.swift) -- a distinct formatter rather than a `/100` call site to avoid an
+/// easy-to-miss silent unit bug at every future call site.
+func formatLiveSocPct(_ pct: Double) -> String {
+    "\(Int(pct.rounded()))%"
 }

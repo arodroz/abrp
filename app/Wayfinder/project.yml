@@ -17,6 +17,13 @@ targets:
     deploymentTarget: "17.0"
     sources:
       - path: Sources
+      # Telemetry Profiles (wayfinder #79): bundled as a folder reference so
+      # `Bundle.main.url(forResource:withExtension:subdirectory:)` can find them at
+      # "profiles/<id>.tprof.json" -- see Ioniq5Profile.loadJson() (TelemetrySessionDialogue.swift).
+      - path: ../../data/profiles
+        name: profiles
+        type: folder
+        buildPhase: resources
     # Generated Info.plist (wayfinder #51): the INFOPLIST_KEY_UIBackgroundModes route doesn't
     # emit the array-valued UIBackgroundModes key at all, so this target uses xcodegen's `info:`
     # properties block instead -- verified with `plutil -p` on the built app's Info.plist.

@@ -9,8 +9,12 @@
 // (Drive Mode core, wayfinder #59) is owned here too, wrapping `store` (PlanStore) rather than
 // duplicating its map/route state. This is also where CarPlaySceneDelegate (wayfinder #70) gets
 // handed `store`/`driveStore` -- UIKit instantiates that scene delegate by class name, so it has
-// no other way to reach the stores this app already owns.
+// no other way to reach the stores this app already owns. TelemetryLinkStore (wayfinder #78/#79)
+// is constructed here too, wrapping the first real `CxBleLink` -- CoreBluetooth degrades that to
+// `.backoff(.bluetoothUnavailable)` on the simulator (see CxBleLink.swift), so constructing it
+// unconditionally is safe there too.
 import Foundation
+import PlannerKit
 import SwiftUI
 import UIKit
 
@@ -44,15 +48,29 @@ struct WayfinderApp: App {
     private let store = PlanStore()
     private let packInstaller = PackInstaller()
     private let tripStore = TripLogStore()
+    private let telemetryStore: TelemetryLinkStore
     private let driveStore: DriveStore
 
     init() {
         _ = Self.launchUptime
-        driveStore = DriveStore(planStore: store, tripStore: tripStore)
+        let telemetryStore = TelemetryLinkStore(link: CxBleLink())
+        // wayfinder #79: one fresh TelemetrySession (one full poll sweep) per poll cycle -- see
+        // TelemetryLinkStore's own header for why. 77.4 kWh Long Range is the driver's actual car
+        // (wayfinder #55); a profile/variant picker is future work (`loadTelemetryProfile` is
+        // that future UI's validation entry point, unused in this v1 hardcoded path).
+        telemetryStore.makeDialogue = {
+            guard let json = Ioniq5Profile.loadJson(),
+                  let session = try? TelemetrySession(profileJson: json, variantId: Ioniq5Profile.variantId)
+            else { return nil }
+            return TelemetrySessionDialogue(session: session)
+        }
+        self.telemetryStore = telemetryStore
+        driveStore = DriveStore(planStore: store, tripStore: tripStore, telemetryStore: telemetryStore)
         // wayfinder #70: the CarPlay scene is UIKit-instantiated by class name, so it can't be
         // handed the stores any other way.
         CarPlaySceneDelegate.planStore = store
         CarPlaySceneDelegate.driveStore = driveStore
+        CarPlaySceneDelegate.telemetryStore = telemetryStore
         Autotest.runIfRequested(store: store, installer: packInstaller, tripStore: tripStore, driveStore: driveStore)
         let installer = packInstaller
         // wayfinder #55: an install of the active region must release the live Planner's
@@ -67,7 +85,7 @@ struct WayfinderApp: App {
 
     var body: some Scene {
         WindowGroup {
-            RootView(store: store, installer: packInstaller, tripStore: tripStore, driveStore: driveStore)
+            RootView(store: store, installer: packInstaller, tripStore: tripStore, driveStore: driveStore, telemetryStore: telemetryStore)
         }
     }
 }

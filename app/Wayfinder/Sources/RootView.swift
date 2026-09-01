@@ -22,6 +22,7 @@ struct RootView: View {
     let installer: PackInstaller
     let tripStore: TripLogStore
     let driveStore: DriveStore
+    let telemetryStore: TelemetryLinkStore
     @Environment(\.colorScheme) private var colorScheme
 
     @State private var toast: String?
@@ -284,7 +285,7 @@ struct RootView: View {
             // The drive HUD card (wayfinder #60): nil `hud` only during the brief window
             // between `go()` and its own initial (unthrottled) computation.
             if driveStore.hud != nil {
-                DriveCard(store: store, driveStore: driveStore, onSocTap: { socCorrectionPresented = true })
+                DriveCard(store: store, driveStore: driveStore, telemetryStore: telemetryStore, onSocTap: { socCorrectionPresented = true })
             }
         }
     }

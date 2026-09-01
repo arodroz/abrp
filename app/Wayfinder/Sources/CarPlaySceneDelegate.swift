@@ -19,6 +19,7 @@ import UIKit
 final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate {
     static var planStore: PlanStore?
     static var driveStore: DriveStore?
+    static var telemetryStore: TelemetryLinkStore?
 
     private var interfaceController: CPInterfaceController?
 
@@ -28,7 +29,7 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
         to window: CPWindow
     ) {
         self.interfaceController = interfaceController
-        guard let planStore = Self.planStore, let driveStore = Self.driveStore else { return }
+        guard let planStore = Self.planStore, let driveStore = Self.driveStore, let telemetryStore = Self.telemetryStore else { return }
 
         // Cold launch from the CarPlay home screen (phone locked/in pocket): RootView.onAppear
         // -- the normal load() trigger -- may never fire, leaving this surface on MapLibre's
@@ -37,7 +38,7 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
         planStore.load()
 
         window.rootViewController = UIHostingController(
-            rootView: CarPlayRootView(planStore: planStore, driveStore: driveStore)
+            rootView: CarPlayRootView(planStore: planStore, driveStore: driveStore, telemetryStore: telemetryStore)
         )
 
         // Deliberately NO root CPMapTemplate in this display-only v1. Everything guidance shows

@@ -144,6 +144,10 @@ enum Autotest {
             Task.detached(priority: .userInitiated) {
                 await runObdSmoke()
             }
+        case "live-soc-smoke":
+            Task.detached(priority: .userInitiated) {
+                await runLiveSocSmoke()
+            }
         default:
             break
         }

@@ -1,13 +1,20 @@
 // Owns policy + link + pump (wayfinder #78), matching TripLogStore/PlanStore's
 // `@MainActor @Observable final class` idiom: private(set) state, injected link (CxBleLink in
 // production, StubTelemetryLink in obd-smoke -- CBCentralManager reports `.unsupported` on the
-// simulator, see TelemetryLink.swift). Exposes phase/state/counters for the future live surface
-// a later ticket adds. Logs EVERY lifecycle transition via os_log (subsystem
+// simulator, see TelemetryLink.swift). Exposes phase/state/counters for the drive HUD/CarPlay
+// live surface (wayfinder #79). Logs EVERY lifecycle transition via os_log (subsystem
 // "org.anteras.wayfinder", category "telemetry") -- an explicit acceptance criterion for this
 // ticket, independent of any UI: `log show`/Console.app must be able to reconstruct what the
 // transport did without a screen attached.
+//
+// Live readings (wayfinder #79): `makeDialogue` builds a fresh `TelemetryReadingDialogue` (one
+// full poll sweep, per-command freq scheduling ignored in v1) each cycle; the poll loop below
+// runs it, drains canonical readings into `latestReadings`, sleeps ~1s, and repeats for as long as
+// `phase == .ready` and the gate stays open. `latestReadings` is keyed generically on
+// `FfiCanonicalSignal` -- ticket #80 will consume more signals than `.displaySoc`.
 import Foundation
 import os
+import PlannerKit
 
 @MainActor
 @Observable
@@ -19,6 +26,19 @@ final class TelemetryLinkStore {
     private(set) var incomingChunkCount = 0
     private(set) var incomingByteCount = 0
 
+    /// Live decoded readings (wayfinder #79), keyed by canonical signal -- only readings with a
+    /// non-nil `canonicalSignal`/`value` ever land here. `lastReadingAt` advances only on a
+    /// sweep that landed at least one such reading, so a sweep that comes back all-NO-DATA (CAN
+    /// briefly busy) doesn't itself trip staleness.
+    private(set) var latestReadings: [FfiCanonicalSignal: Double] = [:]
+    private(set) var lastReadingAt: Date?
+    var liveDisplaySoc: Double? { latestReadings[.displaySoc] }
+
+    /// Builds one fresh `TelemetryReadingDialogue` per poll cycle -- `nil` (no dialogue built,
+    /// e.g. the bundled profile failed to load) just skips that cycle. Set once at construction
+    /// in production (WayfinderApp); obd-smoke/live-soc-smoke set it directly.
+    var makeDialogue: (() -> TelemetryReadingDialogue?)?
+
     /// The 12V-safety gate (wayfinder #78 standing constraint -- see TelemetryLinkPolicy's
     /// header): true while Drive Mode is active OR a live/diagnostics surface is open, ORed into
     /// this one Bool by whatever future ticket wires those real signals in. Defaults closed: a
@@ -27,6 +47,10 @@ final class TelemetryLinkStore {
         didSet {
             guard oldValue != gateOpen else { return }
             Self.log.log("gate \(self.gateOpen ? "open" : "closed", privacy: .public)")
+            if !gateOpen {
+                latestReadings = [:]
+                lastReadingAt = nil
+            }
             retick()
         }
     }
@@ -34,6 +58,9 @@ final class TelemetryLinkStore {
     private let link: TelemetryLink
     private var policyState = TelemetryLinkPolicy.State()
     private var backoffTask: Task<Void, Never>?
+    /// The live-readings poll loop (wayfinder #79) -- exactly one at a time, started when `phase`
+    /// becomes `.ready` and the gate is open, cancelled/replaced the same way `backoffTask` is.
+    private var pollTask: Task<Void, Never>?
 
     init(link: TelemetryLink) {
         self.link = link
@@ -91,6 +118,43 @@ final class TelemetryLinkStore {
         logPhaseTransitionIfNeeded(from: previousPhase, to: policyState.phase)
         apply(command)
         scheduleBackoffWakeIfNeeded(now: now)
+        updatePollLoop()
+    }
+
+    /// Starts the live-readings poll loop the moment `phase` is `.ready` and the gate is open;
+    /// stops it (best-effort -- an already in-flight sweep runs to completion, same as
+    /// `backoffTask`'s own cancellation idiom) the moment either stops being true.
+    private func updatePollLoop() {
+        let shouldRun = phase == .ready && gateOpen
+        if shouldRun, pollTask == nil {
+            pollTask = Task { @MainActor [weak self] in await self?.runPollLoop() }
+        } else if !shouldRun, pollTask != nil {
+            pollTask?.cancel()
+            pollTask = nil
+        }
+    }
+
+    /// One full poll sweep per iteration (wayfinder #79): a fresh dialogue (one `TelemetrySession`
+    /// = one sweep over the whole profile) run to completion via `runOnePoll`, its readings
+    /// drained into `latestReadings`, then ~1s of slack before the next sweep. `runOnePoll`
+    /// itself no-ops once `phase` leaves `.ready`, so this loop's own `while` condition is the
+    /// only thing that needs to stop it.
+    private func runPollLoop() async {
+        while phase == .ready, gateOpen, !Task.isCancelled {
+            guard let dialogue = makeDialogue?() else { break }
+            await runOnePoll(dialogue: dialogue)
+            let readings = dialogue.drainReadings()
+            var landedAny = false
+            for reading in readings {
+                guard let signal = reading.canonicalSignal, let value = reading.value else { continue }
+                latestReadings[signal] = value
+                landedAny = true
+            }
+            if landedAny { lastReadingAt = Date() }
+            Self.log.debug("poll sweep complete, \(readings.count, privacy: .public) readings")
+            guard !Task.isCancelled else { break }
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+        }
     }
 
     private func apply(_ command: TelemetryLinkPolicy.Command?) {
