@@ -127,7 +127,11 @@ final class PlanStore: NSObject, @preconcurrency MLNMapViewDelegate, @preconcurr
     }
     var batteryWarmth = 1.0
     var offerStopFreeAlternative = true
-    var vehicle: FfiVehicle = .ioniq5Lr2wd
+    /// The driver's actual car (m4-gate finding, wayfinder #55): the Long Range AWD, not the
+    /// 2WD this shipped as until then. Must agree with TripLogStore's tlog vehicle stamp —
+    /// drive-smoke asserts that agreement. Autotest's own plan config stays pinned to
+    /// .ioniq5Lr2wd so plan-golden/drive-smoke expectation values keep their baseline.
+    var vehicle: FfiVehicle = .ioniq5LrAwd
     /// nil = vehicle default reference consumption; the settings sheet's Toggle sets/clears
     /// this, and so does `acceptCalibration()` (wayfinder #53). Persisted to UserDefaults like
     /// `appearanceOverride`/`activeRegion` below: read once at init, written here on every change.

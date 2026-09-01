@@ -160,6 +160,9 @@ enum Autotest {
             headwindMs: 0.0,
             batteryWarmth: 1.0,
             offerStopFreeAlternative: false,
+            // Deliberately still the 2WD: every plan-golden/drive-smoke expectation was pinned
+            // under this vehicle, and this config is a fixed scenario, not the driver's car
+            // (which is the AWD — PlanStore.vehicle).
             vehicle: .ioniq5Lr2wd,
             referenceConsumptionWhPerKm: nil
         )
@@ -298,6 +301,9 @@ enum Autotest {
         // CoreLocation fix inside the corridor can never adopt it mid-test -- this is what
         // makes the goldens deterministic regardless of the host machine's location.
         store.setOrigin(CLLocationCoordinate2D(latitude: 49.6116, longitude: 6.1319))
+        // Pin the vehicle too: the goldens below were computed under the 2WD; the live
+        // default is the AWD (PlanStore.vehicle, wayfinder #55).
+        store.vehicle = .ioniq5Lr2wd
         store.load()
 
         let ready = await waitWithTimeout(seconds: 30) { store.plannerStatus == .ready }
@@ -397,6 +403,8 @@ enum Autotest {
     private static func runCardSmoke(store: PlanStore) async {
         // Pin the origin before anything else -- same determinism rationale as editor-smoke.
         store.setOrigin(CLLocationCoordinate2D(latitude: 49.6116, longitude: 6.1319))
+        // Pin the vehicle too -- same rationale as editor-smoke (wayfinder #55).
+        store.vehicle = .ioniq5Lr2wd
         store.load()
 
         let ready = await waitWithTimeout(seconds: 30) { store.plannerStatus == .ready }
@@ -489,6 +497,11 @@ enum Autotest {
     private static func runSettingsSmoke(store: PlanStore) async {
         // Pin the origin before anything else -- same determinism rationale as editor-smoke.
         store.setOrigin(CLLocationCoordinate2D(latitude: 49.6116, longitude: 6.1319))
+        // Pin the vehicle for the same reason: every golden below (stop-free Antwerp,
+        // depart-30/Speed Cap vs golden_corridor.rs) was computed under the 2WD; the live
+        // default is the AWD (PlanStore.vehicle, wayfinder #55), whose +110 kg tips the
+        // razor-thin stop-free Antwerp arrival under the 10% floor.
+        store.vehicle = .ioniq5Lr2wd
         store.load()
 
         let ready = await waitWithTimeout(seconds: 30) { store.plannerStatus == .ready }
@@ -1230,7 +1243,7 @@ enum Autotest {
             report("format", formatOk, "got \(log.format)")
             ok = ok && formatOk
 
-            let vehicleOk = log.vehicle == "ioniq5_lr_2wd"
+            let vehicleOk = log.vehicle == "ioniq5_lr_awd"
             report("vehicle", vehicleOk, "got \(log.vehicle)")
             ok = ok && vehicleOk
 
@@ -1294,12 +1307,12 @@ enum Autotest {
         // tripStore.deleteAllLogs() removes both the files and the in-memory list.
         let syntheticNow = Int(Date().timeIntervalSince1970)
         let syntheticLogA = TripLog(
-            format: "tlog-1", id: UUID().uuidString, vehicle: "ioniq5_lr_2wd",
+            format: "tlog-1", id: UUID().uuidString, vehicle: "ioniq5_lr_awd",
             startUnix: syntheticNow - 200, endUnix: syntheticNow - 100,
             startSocPct: 80, endSocPct: 75, ambientTempC: nil, samples: []
         )
         let syntheticLogB = TripLog(
-            format: "tlog-1", id: UUID().uuidString, vehicle: "ioniq5_lr_2wd",
+            format: "tlog-1", id: UUID().uuidString, vehicle: "ioniq5_lr_awd",
             startUnix: syntheticNow - 100, endUnix: syntheticNow,
             startSocPct: 75, endSocPct: 70, ambientTempC: nil, samples: []
         )
@@ -1376,14 +1389,14 @@ enum Autotest {
         }
         let longId = UUID().uuidString
         let longLog = TripLog(
-            format: "tlog-1", id: longId, vehicle: "ioniq5_lr_2wd",
+            format: "tlog-1", id: longId, vehicle: "ioniq5_lr_awd",
             startUnix: now - 5000, endUnix: now,
             startSocPct: 90, endSocPct: 55, ambientTempC: 15.0, samples: straightLineSamples(count: 4680)
         )
         let shortId = UUID().uuidString
         let shortStartUnix = now - 6000
         let shortLog = TripLog(
-            format: "tlog-1", id: shortId, vehicle: "ioniq5_lr_2wd",
+            format: "tlog-1", id: shortId, vehicle: "ioniq5_lr_awd",
             startUnix: shortStartUnix, endUnix: shortStartUnix + 120,
             startSocPct: 90, endSocPct: 89, ambientTempC: 15.0, samples: straightLineSamples(count: 120)
         )

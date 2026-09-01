@@ -130,8 +130,10 @@ final class TripLogStore: NSObject, @preconcurrency CLLocationManagerDelegate {
 
         Task {
             let ambientTempC = await midpointTemperature(samples: capturedSamples, startUnix: startUnix)
+            // Tag must agree with PlanStore.vehicle, or calibrate() excludes the log as a
+            // vehicle mismatch (drive-smoke asserts the stamped tag).
             let log = TripLog(
-                format: "tlog-1", id: UUID().uuidString, vehicle: "ioniq5_lr_2wd",
+                format: "tlog-1", id: UUID().uuidString, vehicle: "ioniq5_lr_awd",
                 startUnix: startUnix, endUnix: endUnix,
                 startSocPct: capturedStartSocPct, endSocPct: endSocPct,
                 ambientTempC: ambientTempC, samples: capturedSamples
