@@ -33,9 +33,12 @@ enum RouteSnap {
     }
 
     /// Projects `fix` onto the nearest point of `polyline`. `hintSegment` narrows the search to
-    /// the window [hint-10, hint+50] (clamped to the polyline's segment range) to keep the
-    /// per-fix cost O(window) on multi-thousand-point polylines; if the best candidate in that
-    /// window is still more than 250 m away (a GPS jump, or a hint from a stale/different
+    /// a DISTANCE window around the hint's along-route position (500 m back, 5 km ahead --
+    /// segment-count windows broke when wayfinder #84 densified the polyline: 50 segments
+    /// shrank from tens of km to a few hundred meters, so a fix past the window could snap to a
+    /// wrong-but-nearby parallel pass of the route instead of reaching the fallback) to keep
+    /// the per-fix cost O(window) on multi-thousand-point polylines; if the best candidate in
+    /// that window is still more than 250 m away (a GPS jump, or a hint from a stale/different
     /// route), falls back to a full scan. `nil` hint always does a full scan. Returns `nil` only
     /// when `polyline` has fewer than 2 points.
     static func snap(
@@ -61,8 +64,14 @@ enum RouteSnap {
 
         let windowRange: Range<Int>
         if let hintSegment {
-            let lo = max(0, min(hintSegment, segmentCount - 1) - 10)
-            let hi = min(segmentCount - 1, hintSegment + 50)
+            let windowBackM = 500.0
+            let windowAheadM = 5_000.0
+            let hint = max(0, min(hintSegment, segmentCount - 1))
+            let hintDistM = cumulativeM[hint]
+            var lo = hint
+            while lo > 0, cumulativeM[lo] > hintDistM - windowBackM { lo -= 1 }
+            var hi = hint
+            while hi < segmentCount - 1, cumulativeM[hi + 1] < hintDistM + windowAheadM { hi += 1 }
             windowRange = lo..<(hi + 1)
         } else {
             windowRange = 0..<segmentCount

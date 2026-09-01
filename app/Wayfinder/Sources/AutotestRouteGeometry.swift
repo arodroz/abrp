@@ -144,9 +144,10 @@ extension Autotest {
 
         // Center on the ORIGIN, not a bounds-fit of the leading stretch: the search sheet covers
         // the top half of the screen in this staged state, and the origin trim + dashed connector
-        // (the user-visible half of wayfinder #84) must land in the visible mid-band. Zoom 15
-        // still shows a few blocks of road-following fidelity around it.
-        store.mapView.setCenter(store.originCoordinate, zoomLevel: 15, animated: false)
+        // (the user-visible half of wayfinder #84) must land in the visible mid-band. Zoom 17 is
+        // street level -- where the user's own screenshots showed off-track chords and kinked
+        // curves -- so the reviewer judges the line exactly where the defect lived.
+        store.mapView.setCenter(store.originCoordinate, zoomLevel: 17, animated: false)
 
         print("AUTOTEST map-demo-route READY")
     }

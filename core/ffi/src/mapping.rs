@@ -321,13 +321,17 @@ fn simplify_dp(points: &[FfiGeoPoint], tolerance_m: f64) -> Vec<FfiGeoPoint> {
 
 /// Concatenates each Leg's `route_edges` geometry (dropping the duplicated
 /// junction vertex between consecutive edges within a Leg), simplified with
-/// Douglas-Peucker at a 3 m tolerance -- applied per Leg so Leg boundaries
+/// Douglas-Peucker at a 0.5 m tolerance -- applied per Leg so Leg boundaries
 /// (Charging Stops, Waypoints) stay exact -- to bound the `RustBuffer` (ADR
 /// 0004 point 3) with an actual geometric error guarantee instead of index
-/// decimation. Needs `&Rpack`, so unlike the rest of this module it is
-/// exercised by the Swift golden test rather than a Rust unit test.
+/// decimation. 0.5 m keeps the drawn line sub-pixel-faithful to the road up
+/// to about zoom 18 (a 3 m tolerance visibly cut gentle curves into kinked
+/// chords at street zoom); it only prunes genuinely collinear vertices, so
+/// the count stays a small multiple of the base map's own road geometry.
+/// Needs `&Rpack`, so unlike the rest of this module it is exercised by the
+/// Swift golden test rather than a Rust unit test.
 pub fn build_polyline(pack: &Rpack, plan: &Plan) -> Vec<FfiGeoPoint> {
-    const SIMPLIFY_TOLERANCE_M: f64 = 3.0;
+    const SIMPLIFY_TOLERANCE_M: f64 = 0.5;
     let mut out: Vec<FfiGeoPoint> = Vec::new();
 
     for leg in &plan.legs {

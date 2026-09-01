@@ -64,20 +64,44 @@ enum RouteLayer {
         let routeSource = MLNShapeSource(identifier: routeSourceId, shape: routeShape, options: nil)
         style.addSource(routeSource)
 
+        // Route ribbon (wayfinder #84 follow-up): zoom-interpolated width that COVERS the
+        // rendered road at street zoom -- the Google/Apple trick that hides the base tiles' own
+        // generalization error (overzoomed z14 tile roads are the imprecise line at z17+, not
+        // this geometry) -- inserted BELOW the style's first symbol layer so road labels and
+        // shields stay readable on top of it, the industry-standard slot (Mapbox Navigation's
+        // `routeLineBelowLayerId: "road-label"`).
+        let firstSymbolLayer = style.layers.first { $0 is MLNSymbolStyleLayer }
+
+        func addRouteLayer(_ layer: MLNLineStyleLayer, above: MLNStyleLayer?) {
+            if let above {
+                style.insertLayer(layer, above: above)
+            } else if let firstSymbolLayer {
+                style.insertLayer(layer, below: firstSymbolLayer)
+            } else {
+                style.addLayer(layer)
+            }
+        }
+        func widthExpression(_ stops: [NSNumber: Double]) -> NSExpression {
+            NSExpression(
+                format: "mgl_interpolate:withCurveType:parameters:stops:($zoomLevel, 'exponential', 1.5, %@)",
+                stops.mapValues { NSExpression(forConstantValue: $0) }
+            )
+        }
+
         let routeLine = MLNLineStyleLayer(identifier: routeLineId, source: routeSource)
-        routeLine.lineWidth = NSExpression(forConstantValue: 6.0)
+        routeLine.lineWidth = widthExpression([5: 4, 10: 6, 14: 9, 16: 14, 18: 26])
         routeLine.lineColor = NSExpression(forConstantValue: UIColor.systemBlue)
         routeLine.lineJoin = NSExpression(forConstantValue: "round")
         routeLine.lineCap = NSExpression(forConstantValue: "round")
-        style.addLayer(routeLine)
+        addRouteLayer(routeLine, above: nil)
 
         // Thin brighter line on top, for looks.
         let routeLineTop = MLNLineStyleLayer(identifier: routeLineTopId, source: routeSource)
-        routeLineTop.lineWidth = NSExpression(forConstantValue: 2.0)
+        routeLineTop.lineWidth = widthExpression([5: 1.5, 10: 2, 14: 3.5, 16: 5.5, 18: 10])
         routeLineTop.lineColor = NSExpression(forConstantValue: UIColor.cyan)
         routeLineTop.lineJoin = NSExpression(forConstantValue: "round")
         routeLineTop.lineCap = NSExpression(forConstantValue: "round")
-        style.addLayer(routeLineTop)
+        addRouteLayer(routeLineTop, above: routeLine)
 
         if !connectors.isEmpty {
             let connectorFeatures: [[String: Any]] = connectors.map { connector in
@@ -103,7 +127,8 @@ enum RouteLayer {
                 connectorLine.lineDashPattern = NSExpression(forConstantValue: [1.5, 1.5])
                 connectorLine.lineCap = NSExpression(forConstantValue: "round")
                 connectorLine.lineJoin = NSExpression(forConstantValue: "round")
-                style.addLayer(connectorLine)
+                // Same below-labels slot as the route ribbon above.
+                addRouteLayer(connectorLine, above: routeLineTop)
             }
         }
 

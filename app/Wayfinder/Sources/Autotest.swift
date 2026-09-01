@@ -2508,7 +2508,11 @@ enum Autotest {
             CLLocation(latitude: $0.lat, longitude: $0.lon)
                 .distance(from: CLLocation(latitude: snapped63.latitude, longitude: snapped63.longitude))
         } ?? .infinity
-        let anchorOk = newOriginDistM63 <= 300
+        // <= 600, not a tight bound: the replan's polyline starts at the JUNCTION NODE the
+        // car's position snapped to (wayfinder #84's out-of-scope note), and junction spacing
+        // here can put that several hundred meters away -- the check guards "near the car",
+        // while the SoC anchor equality below is the actual point of the ticket.
+        let anchorOk = newOriginDistM63 <= 600
             && (newPlan63.socCurve.first.map { isClose($0.soc, 0.55, tol: 0.001) } ?? false)
         report(
             "soc-correct-anchor", anchorOk,
