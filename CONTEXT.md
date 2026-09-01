@@ -109,8 +109,12 @@ The action that enters Drive Mode with the current Plan, available only when the
 _Avoid_: Start navigation, start route, depart
 
 **Telemetry Profile**:
-The data file describing how to read one vehicle's live telemetry over OBD: which ECUs answer, which identifiers to poll, how response bytes decode into signals, and the pack-variant constants. Data, not code — the polling and decoding engine is generic. Distinct from the Vehicle Model, which holds energy parameters; a supported car has both. Each profile carries a validation tier: car-validated (checked against a real car), vector-validated (passes recorded test vectors in the replay harness), or paper (defined, untested).
+The data file describing how to read one vehicle's live telemetry over OBD: which ECUs answer, which identifiers to poll, how response bytes decode into signals, the pack-variant constants, and the mapping of its native signals onto Canonical Signals. Data, not code — the polling and decoding engine is generic. Distinct from the Vehicle Model, which holds energy parameters; a supported car has both. Each profile carries a validation tier: car-validated (checked against a real car), vector-validated (passes recorded test vectors in the replay harness), or paper (defined, untested).
 _Avoid_: PID list, decoder config, car module
+
+**Canonical Signal**:
+One of the engine's small fixed vocabulary of live-telemetry readings (BMS SoC, Display SoC, pack current, cell voltages, cumulative energy counters, …) that every Telemetry Profile maps its native signals onto. The app consumes Canonical Signals only, never a profile's native signal names.
+_Avoid_: Standard signal, metric, PID name
 
 **BMS SoC**:
 The battery's true state of charge as its management system reports it, over the manufacturer-defined usable window. Read over OBD; diverges from Display SoC, most near full charge.
