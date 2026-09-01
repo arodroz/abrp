@@ -26,6 +26,11 @@ targets:
         CFBundleDisplayName: Wayfinder
         UILaunchScreen: {}
         NSLocationWhenInUseUsageDescription: "Shows map data and charging stops for your route, and records your GPS trace during Trip Log capture. When a Trip Log is saved, an approximate (rounded) midpoint is sent to Open-Meteo to fetch the outside temperature."
+        # OBDLink CX telemetry transport (wayfinder #78): only ever connects while Drive Mode is
+        # active or a live/diagnostics surface is open, never while parked -- see
+        # TelemetryLinkPolicy.swift. Deliberately no UIBackgroundModes bluetooth-central entry:
+        # v1 is foreground-only, by design (the ticket forbids background scanning).
+        NSBluetoothAlwaysUsageDescription: "Connects to an OBDLink CX adapter to read your car's live battery data over Bluetooth while driving or viewing diagnostics."
         UIBackgroundModes:
           - location
           - audio

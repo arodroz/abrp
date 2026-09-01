@@ -140,6 +140,10 @@ enum Autotest {
             Task.detached(priority: .userInitiated) {
                 await runDriveSmoke(store: store, tripStore: tripStore, driveStore: driveStore)
             }
+        case "obd-smoke":
+            Task.detached(priority: .userInitiated) {
+                await runObdSmoke()
+            }
         default:
             break
         }
@@ -168,7 +172,12 @@ enum Autotest {
         )
     }
 
-    private static func report(_ name: String, _ ok: Bool, _ detail: String = "") {
+    // `report`/`finish` are internal, not private (wayfinder #78): AutotestObdSmoke.swift's
+    // `runObdSmoke` needs them, and lives in its own file rather than inline here -- see that
+    // file's header for why (a Swift strict-concurrency checker precision limit tied to this
+    // file's size, reproduced empirically: identical new code compiles clean in a separate file
+    // but not appended here).
+    static func report(_ name: String, _ ok: Bool, _ detail: String = "") {
         let status = ok ? "PASS" : "FAIL"
         let suffix = detail.isEmpty ? "" : "(\(detail))"
         print("WAYFINDER-AUTOTEST: \(name) \(status)\(suffix)")
@@ -185,7 +194,7 @@ enum Autotest {
 
     /// `sleepSeconds` is the screenshot window for editor-smoke: the external screenshot of
     /// the post-DONE UI state is taken while this runs.
-    private static func finish(ok: Bool, sleepSeconds: Double = 1.0) async -> Never {
+    static func finish(ok: Bool, sleepSeconds: Double = 1.0) async -> Never {
         print("WAYFINDER-AUTOTEST: DONE ok=\(ok)")
         try? await Task.sleep(nanoseconds: UInt64(sleepSeconds * 1_000_000_000))
         exit(ok ? 0 : 1)
@@ -2469,7 +2478,8 @@ enum Autotest {
 
     /// Polls `condition` every 100ms until it's true or `seconds` elapses.
     @MainActor
-    private static func waitWithTimeout(seconds: Double, until condition: () -> Bool) async -> Bool {
+    // Internal, not private, for the same reason as `report`/`finish` above.
+    static func waitWithTimeout(seconds: Double, until condition: () -> Bool) async -> Bool {
         let deadline = DispatchTime.now() + seconds
         while !condition() {
             if DispatchTime.now() >= deadline { return condition() }
