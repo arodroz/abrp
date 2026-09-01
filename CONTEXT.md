@@ -93,7 +93,7 @@ The maximum cruise speed the planner assumes for a Leg when lower than the road'
 _Avoid_: Speed adaptation, slow-down, eco speed
 
 **Trip Log**:
-The record of one real drive used to calibrate the Energy Model: an automatically captured GPS trace with timestamps and ambient temperature, plus the dash SoC entered by the driver at start and end.
+The record of one real drive used to calibrate the Energy Model: an automatically captured GPS trace with timestamps and ambient temperature, plus the Display SoC read off the dash and entered by the driver at start and end.
 _Avoid_: Drive log, telemetry, trip history
 
 **Invalid Plan**:
@@ -107,3 +107,15 @@ _Avoid_: Navigation mode, turn-by-turn, guidance mode
 **Go**:
 The action that enters Drive Mode with the current Plan, available only when the Plan's origin is the current location; entering it also opens the drive's Trip Log.
 _Avoid_: Start navigation, start route, depart
+
+**Telemetry Profile**:
+The data file describing how to read one vehicle's live telemetry over OBD: which ECUs answer, which identifiers to poll, how response bytes decode into signals, and the pack-variant constants. Data, not code — the polling and decoding engine is generic. Distinct from the Vehicle Model, which holds energy parameters; a supported car has both. Each profile carries a validation tier: car-validated (checked against a real car), vector-validated (passes recorded test vectors in the replay harness), or paper (defined, untested).
+_Avoid_: PID list, decoder config, car module
+
+**BMS SoC**:
+The battery's true state of charge as its management system reports it, over the manufacturer-defined usable window. Read over OBD; diverges from Display SoC, most near full charge.
+_Avoid_: Raw SoC, true SoC, real SoC
+
+**Display SoC**:
+The buffered remap of BMS SoC the car presents to the driver — the number on the dash, in the OEM app, and in a Trip Log's typed-in readings. What SoC means everywhere else in this glossary.
+_Avoid_: Dash SoC, displayed charge
