@@ -12,6 +12,11 @@
 // decoded Display SoC through `LiveSocPresentation` -- hidden with no reading yet, `.primary`
 // while fresh, dimmed `.secondary` once stale. Wrapped in a `TimelineView` so the fresh->stale
 // flip happens on wall-clock time alone, not just when a new poll happens to land.
+//
+// SoC chart overhaul (wayfinder #83): the expanded chart now also gets the actual-SoC trail
+// (`driveStore.socTrail`), the charger-floor threshold for its danger band/callouts
+// (`store.chargerArrivalMinSoc`), and a freshness-checked live SoC for its position dot -- same
+// TimelineView idiom as the chip above, its own instance since it wraps a different value.
 import SwiftUI
 
 struct DriveCard: View {
@@ -38,9 +43,25 @@ struct DriveCard: View {
 
             if driveStore.driveCardExpanded {
                 Divider().padding(.top, 4)
-                SoCChartView(store: store, height: 160, pinnedDistanceM: driveStore.distanceAlongRouteM)
-                    .padding(.horizontal)
-                    .padding(.vertical, 8)
+                // wayfinder #83: the live-position dot prefers the live OBD Display SoC over the
+                // model's curve estimate, same freshness gate as `liveSocChip` above -- wrapped in
+                // its own TimelineView so a reading that goes stale mid-expansion (no new fix) still
+                // falls back to the curve estimate without waiting on the next `ingest`.
+                TimelineView(.periodic(from: .now, by: 5)) { context in
+                    let liveSocPct: Double? = {
+                        guard let soc = telemetryStore.liveDisplaySoc, let at = telemetryStore.lastReadingAt,
+                              context.date.timeIntervalSince(at) <= TelemetryLinkStore.snapshotFreshnessS
+                        else { return nil }
+                        return soc
+                    }()
+                    SoCChartView(
+                        store: store, height: 160, pinnedDistanceM: driveStore.distanceAlongRouteM,
+                        trail: driveStore.socTrail, liveSocPct: liveSocPct,
+                        amberFloorPct: store.chargerArrivalMinSoc * 100
+                    )
+                }
+                .padding(.horizontal)
+                .padding(.vertical, 8)
             } else {
                 Spacer().frame(height: 12)
             }

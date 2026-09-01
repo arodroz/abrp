@@ -44,7 +44,10 @@ struct ResultCard: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 16) {
                         itinerary
-                        SoCChartView(store: store)
+                        // wayfinder #83: the charger arrival floor (PlanStore.chargerArrivalMinSoc)
+                        // colors the chart's danger band/callouts, same threshold the planner itself
+                        // enforces.
+                        SoCChartView(store: store, amberFloorPct: store.chargerArrivalMinSoc * 100)
                             .padding(.horizontal)
                     }
                     .padding(.vertical, 12)

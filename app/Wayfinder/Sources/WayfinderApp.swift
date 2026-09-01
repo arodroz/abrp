@@ -84,7 +84,10 @@ struct WayfinderApp: App {
         CarPlaySceneDelegate.planStore = store
         CarPlaySceneDelegate.driveStore = driveStore
         CarPlaySceneDelegate.telemetryStore = telemetryStore
-        Autotest.runIfRequested(store: store, installer: packInstaller, tripStore: tripStore, driveStore: driveStore)
+        Autotest.runIfRequested(
+            store: store, installer: packInstaller, tripStore: tripStore, driveStore: driveStore,
+            telemetryStore: telemetryStore
+        )
         let installer = packInstaller
         // wayfinder #55: an install of the active region must release the live Planner's
         // mmapped .rpack before the installer's deep verify tries to mmap the staged

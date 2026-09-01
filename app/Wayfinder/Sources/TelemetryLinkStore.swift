@@ -61,6 +61,16 @@ final class TelemetryLinkStore {
         }
     }
 
+    /// Test/demo seam (wayfinder #83): sets a synthetic Display SoC reading directly, bypassing
+    /// the real link/poll loop entirely -- for `soc-chart-smoke`'s trail-thinning assertions and
+    /// `chart-demo-drive`'s visual trail, neither of which has real BLE hardware to script a full
+    /// engine dialogue for (see AutotestSocChart.swift's header for why this is preferred over
+    /// rebuilding live-soc-smoke's scripted engine dialogue just for this).
+    func setSyntheticDisplaySoc(_ pct: Double, at date: Date = Date()) {
+        latestReadings[.displaySoc] = pct
+        lastReadingAt = date
+    }
+
     private let link: TelemetryLink
     private var policyState = TelemetryLinkPolicy.State()
     private var backoffTask: Task<Void, Never>?

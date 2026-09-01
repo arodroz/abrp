@@ -48,6 +48,13 @@
 // never longer. Closing on end/arrival always happens AFTER trip capture closes -- see the
 // ordering comment in `end()`; that ordering exists FOR the end-of-trip telemetry snapshot
 // (wayfinder #80, `TripLogStore.stopTapped`), which must still be able to read `latestReadings`.
+//
+// SoC chart overhaul (wayfinder #83): `socTrail` records the ACTUAL SoC over distance (Tesla-
+// style overlay on the predicted curve) whenever a fresh live OBD reading lands during `ingest`,
+// thinned via `SoCChartModel.shouldAppendTrailPoint`; reset on every `enterDrive`, same lifecycle
+// as `voiceEventLog`. Everything else the chart needs (callouts, margin coloring, interpolation)
+// is pure and lives in SoCChartModel.swift instead, so this file's own state stays exactly what
+// it was: the trail is its one addition.
 import CoreLocation
 import Foundation
 import MapLibre
@@ -105,6 +112,11 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
     /// Whether the drive card (wayfinder #60) shows its expanded SoC chart. Plain var, like
     /// `PlanStore.cardExpanded` -- UI + drive-smoke drive it directly.
     var driveCardExpanded = false
+    /// The actual-SoC trail (wayfinder #83, design point 5's Tesla-style overlay): thinned via
+    /// `SoCChartModel.shouldAppendTrailPoint`, appended to in `ingest` only when the live OBD
+    /// reading is fresh -- empty (and the chart identical to the predicted-only curve) with no
+    /// dongle connected. Reset on every `enterDrive`.
+    private(set) var socTrail: [SoCChartModel.SoCTrailPoint] = []
     /// Bumped when an off-route replan (wayfinder #61) lands; RootView's toast trigger.
     private(set) var routeUpdatedVersion = 0
     /// A Go awaiting the start-SoC prompt's outcome (wayfinder #62); the drive hasn't entered
@@ -269,6 +281,9 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
         // wayfinder #68: the voice log's story starts fresh each drive, same reasoning as the
         // flags above -- a re-entered drive must not carry over the previous drive's spoken log.
         voiceEventLog = []
+        // wayfinder #83: the actual-SoC trail is drive-scoped too -- a re-entered drive starts a
+        // fresh trail, never carrying over the previous drive's.
+        socTrail = []
         snapshotPlan(plan)
         snappedCoordinate = nil
         isOnRoute = false
@@ -387,6 +402,18 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
         ) else { return }
         lastSegmentIndex = result.segmentIndex
         distanceAlongRouteM = result.distanceAlongRouteM
+
+        // Actual SoC trail (wayfinder #83, design point 5): recorded only when the live OBD
+        // reading is fresh -- same wall-clock freshness gate RootView's SoC-prompt auto-fill uses
+        // (TelemetryLinkStore.snapshotFreshnessS) -- and thinned via
+        // SoCChartModel.shouldAppendTrailPoint so a ~1 Hz fix stream doesn't flood the chart.
+        if let telemetryStore, let liveSoc = telemetryStore.liveDisplaySoc, let lastReadingAt = telemetryStore.lastReadingAt,
+           Date().timeIntervalSince(lastReadingAt) <= TelemetryLinkStore.snapshotFreshnessS {
+            let candidate = SoCChartModel.SoCTrailPoint(distM: distanceAlongRouteM, socPct: liveSoc)
+            if SoCChartModel.shouldAppendTrailPoint(lastKept: socTrail.last, candidate: candidate) {
+                socTrail.append(candidate)
+            }
+        }
 
         // Position-driven stepper (ADR 0012 points 3/5, wayfinder #60): the drive's ONLY
         // stepper. A `while`, not an `if`, in case one fix jumps past more than one stop/leg

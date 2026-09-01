@@ -89,6 +89,14 @@
 // the auto-captured `telemetry` block lands the sweep-1 start values and the final-sweep end
 // values, Rust's `calibrate()` consumes the measured net-of-regen energy from the counters
 // (`measured == true`), and a telemetry-free drive still saves a tlog with no `telemetry` block.
+// `--autotest soc-chart-smoke` (wayfinder #83, in AutotestSocChart.swift) asserts SoCChartModel's
+// pure functions directly, no UI: arrival-SoC callouts built from synthetic ChargingStopVM/
+// destination inputs, socMarginColor's red/amber/green boundaries, curve interpolation (mid-
+// segment, before-first, after-last), and the actual-SoC trail's thinning + `enterDrive` reset,
+// driven through a real DriveStore/StubTelemetryLink pair via the `setSyntheticDisplaySoc` seam
+// rather than a full scripted engine dialogue. `chart-demo-plan`/`chart-demo-drive` (same file)
+// are visual-verification-only: they stage the overhauled chart in the result card / drive HUD
+// and print a READY line instead of finishing, for the reviewer's own screenshot.
 import CoreLocation
 import CryptoKit
 import Darwin
@@ -97,7 +105,10 @@ import MapLibre
 import PlannerKit
 
 enum Autotest {
-    static func runIfRequested(store: PlanStore, installer: PackInstaller, tripStore: TripLogStore, driveStore: DriveStore) {
+    static func runIfRequested(
+        store: PlanStore, installer: PackInstaller, tripStore: TripLogStore, driveStore: DriveStore,
+        telemetryStore: TelemetryLinkStore
+    ) {
         let args = ProcessInfo.processInfo.arguments
         guard let flagIndex = args.firstIndex(of: "--autotest"),
               flagIndex + 1 < args.count
@@ -155,6 +166,18 @@ enum Autotest {
         case "triplog-telemetry-smoke":
             Task.detached(priority: .userInitiated) {
                 await runTriplogTelemetrySmoke()
+            }
+        case "soc-chart-smoke":
+            Task.detached(priority: .userInitiated) {
+                await runSocChartSmoke()
+            }
+        case "chart-demo-plan":
+            Task.detached(priority: .userInitiated) {
+                await runChartDemoPlan(store: store)
+            }
+        case "chart-demo-drive":
+            Task.detached(priority: .userInitiated) {
+                await runChartDemoDrive(store: store, tripStore: tripStore, driveStore: driveStore, telemetryStore: telemetryStore)
             }
         default:
             break
