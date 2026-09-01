@@ -6,6 +6,16 @@
 import CoreLocation
 import Foundation
 
+/// One telemetry snapshot at a moment in time (wayfinder #80): what `TripLogStore` asks its
+/// injected `telemetrySnapshot` closure for at trip start and end. Distinct from `TripTelemetry`
+/// (TripLog.swift), the on-disk start+end MERGED record -- this is just one endpoint's readings.
+struct TripTelemetrySnapshot {
+    let displaySocPct: Double?
+    let bmsSocPct: Double?
+    let cumulativeChargeKwh: Double?
+    let cumulativeDischargeKwh: Double?
+}
+
 // Swift 6 strict concurrency (M-05 -- docs/codebase-audit-2026-08-29.md): `@preconcurrency`
 // conformance is sound here because CLLocationManager delivers callbacks on the runloop of the
 // thread that started it -- main, since `locationManager` is a stored property initialized from
@@ -47,11 +57,23 @@ final class TripLogStore: NSObject, @preconcurrency CLLocationManagerDelegate {
     /// the app-wide authorization status (a fresh CLLocationManager reads the same status as
     /// any other instance).
     var authorizationStatus: () -> CLAuthorizationStatus = { CLLocationManager().authorizationStatus }
+    /// Injectable so telemetry-smoke can wire a fake source instead of reaching into
+    /// TelemetryLinkStore directly (wayfinder #80) -- same idiom as `fetchTemperature`. Defaults
+    /// to no telemetry, the no-dongle fallback. Read at `confirmStartSoc` (if already fresh),
+    /// lazily by `ingest` (the FIRST fresh snapshot while recording), and at `stopTapped`.
+    var telemetrySnapshot: () -> TripTelemetrySnapshot? = { nil }
 
     private let locationManager = CLLocationManager()
     private var samples: [TripSample] = []
     private var lastKeptLocation: CLLocation?
     private var startSocPct = 0
+    /// Captured at `confirmStartSoc` if a fresh reading already exists, else lazily by the first
+    /// fresh `ingest` call while `.recording` (wayfinder #80) -- the BLE link only connects once
+    /// the drive's Go opens the gate, so the first sweep may land a few seconds into the trip.
+    private var startTelemetry: TripTelemetrySnapshot?
+    /// Captured at `stopTapped`, the moment recording stops -- DriveStore's gate-close ordering
+    /// guarantees readings are still present then (wayfinder #80).
+    private var endTelemetry: TripTelemetrySnapshot?
 
     override init() {
         super.init()
@@ -91,12 +113,20 @@ final class TripLogStore: NSObject, @preconcurrency CLLocationManagerDelegate {
         lastKeptLocation = nil
         sampleCount = 0
         distanceM = 0
+        // wayfinder #80: the lazy-start-snapshot's "already fresh" case -- go() opens the
+        // 12V-safety gate at intent-to-drive, so the link is usually connected by now.
+        startTelemetry = telemetrySnapshot()
+        endTelemetry = nil
         phase = .recording
         startLocationUpdates()
     }
 
     func stopTapped() {
         guard phase == .recording else { return }
+        // wayfinder #80: captured HERE, before the gate closes -- DriveStore closes trip capture
+        // before the gate (see its `end()`/arrival-branch comments), so readings are guaranteed
+        // still present at this exact call.
+        endTelemetry = telemetrySnapshot()
         phase = .promptingEndSoc
         locationManager.stopUpdatingLocation()
         locationManager.allowsBackgroundLocationUpdates = false
@@ -127,6 +157,9 @@ final class TripLogStore: NSObject, @preconcurrency CLLocationManagerDelegate {
         let startUnix = Int(tripStartDate.timeIntervalSince1970)
         let endUnix = Int(Date.now.timeIntervalSince1970)
         let capturedStartSocPct = startSocPct
+        let capturedTelemetry = Self.telemetryBlock(start: startTelemetry, end: endTelemetry)
+        startTelemetry = nil
+        endTelemetry = nil
 
         Task {
             let ambientTempC = await midpointTemperature(samples: capturedSamples, startUnix: startUnix)
@@ -136,7 +169,8 @@ final class TripLogStore: NSObject, @preconcurrency CLLocationManagerDelegate {
                 format: "tlog-1", id: UUID().uuidString, vehicle: "ioniq5_lr_awd",
                 startUnix: startUnix, endUnix: endUnix,
                 startSocPct: capturedStartSocPct, endSocPct: endSocPct,
-                ambientTempC: ambientTempC, samples: capturedSamples
+                ambientTempC: ambientTempC, samples: capturedSamples,
+                telemetry: capturedTelemetry
             )
             do {
                 lastSavedURL = try TripLogStorage.save(log)
@@ -163,6 +197,12 @@ final class TripLogStore: NSObject, @preconcurrency CLLocationManagerDelegate {
     /// producer doesn't.
     func ingest(_ location: CLLocation) {
         guard phase == .recording, let tripStartDate else { return }
+        // wayfinder #80: the lazy-start-snapshot fill -- cheap guard on "still nil", so this
+        // costs nothing once a snapshot has landed. Runs even for a fix this call goes on to
+        // drop (below): the snapshot has nothing to do with sample thinning/validity.
+        if startTelemetry == nil {
+            startTelemetry = telemetrySnapshot()
+        }
         let t = location.timestamp.timeIntervalSince(tripStartDate)
         guard t >= 0 else { return }
         guard CLLocationCoordinate2DIsValid(location.coordinate),
@@ -240,6 +280,23 @@ final class TripLogStore: NSObject, @preconcurrency CLLocationManagerDelegate {
     }
 
     // MARK: Private
+
+    /// Merges the start/end telemetry snapshots into one on-disk block (wayfinder #80), or `nil`
+    /// when telemetry never appeared at either end -- omitting the block entirely rather than
+    /// saving one that's all-null.
+    private static func telemetryBlock(start: TripTelemetrySnapshot?, end: TripTelemetrySnapshot?) -> TripTelemetry? {
+        let block = TripTelemetry(
+            startDisplaySocPct: start?.displaySocPct, endDisplaySocPct: end?.displaySocPct,
+            startBmsSocPct: start?.bmsSocPct, endBmsSocPct: end?.bmsSocPct,
+            startCumulativeChargeKwh: start?.cumulativeChargeKwh, endCumulativeChargeKwh: end?.cumulativeChargeKwh,
+            startCumulativeDischargeKwh: start?.cumulativeDischargeKwh, endCumulativeDischargeKwh: end?.cumulativeDischargeKwh
+        )
+        let anyPresent = block.startDisplaySocPct != nil || block.endDisplaySocPct != nil
+            || block.startBmsSocPct != nil || block.endBmsSocPct != nil
+            || block.startCumulativeChargeKwh != nil || block.endCumulativeChargeKwh != nil
+            || block.startCumulativeDischargeKwh != nil || block.endCumulativeDischargeKwh != nil
+        return anyPresent ? block : nil
+    }
 
     private func midpointTemperature(samples: [TripSample], startUnix: Int) async -> Double? {
         guard !samples.isEmpty else { return nil }

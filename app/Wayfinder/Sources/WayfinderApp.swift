@@ -65,6 +65,19 @@ struct WayfinderApp: App {
             return TelemetrySessionDialogue(session: session)
         }
         self.telemetryStore = telemetryStore
+        // wayfinder #80: Trip Log auto-capture reads straight off the live readings, only when
+        // fresh -- see TelemetryLinkStore.snapshotFreshnessS.
+        tripStore.telemetrySnapshot = { [telemetryStore] in
+            guard let lastReadingAt = telemetryStore.lastReadingAt,
+                  Date().timeIntervalSince(lastReadingAt) <= TelemetryLinkStore.snapshotFreshnessS
+            else { return nil }
+            let readings = telemetryStore.latestReadings
+            return TripTelemetrySnapshot(
+                displaySocPct: readings[.displaySoc], bmsSocPct: readings[.bmsSoc],
+                cumulativeChargeKwh: readings[.cumulativeChargeEnergy],
+                cumulativeDischargeKwh: readings[.cumulativeDischargeEnergy]
+            )
+        }
         driveStore = DriveStore(planStore: store, tripStore: tripStore, telemetryStore: telemetryStore)
         // wayfinder #70: the CarPlay scene is UIKit-instantiated by class name, so it can't be
         // handed the stores any other way.

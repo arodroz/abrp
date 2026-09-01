@@ -188,6 +188,10 @@ pub struct FfiTripFit {
     /// even for a trip too short to gate acceptance).
     pub error_points: Option<f64>,
     pub excluded_reason: Option<String>,
+    /// `true` only when `actual_wh` came from the tlog-1 telemetry block's cumulative
+    /// charge/discharge counters (ADR 0014, wayfinder #80) rather than a display-SoC-derived
+    /// inference; `false` for every excluded row too.
+    pub measured: bool,
 }
 
 /// `Planner::calibrate`'s result (ADR 0009 points 3-5).

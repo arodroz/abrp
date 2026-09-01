@@ -2,6 +2,9 @@
 // timestamps, ambient temperature, and manual start/end dash SoC. On-disk format `tlog-1`,
 // snake_case keys via CodingKeys matching cpack-1's style (CPack1.swift). This schema is the
 // contract #52's Rust `calibrate()` will parse -- keep it exactly as specified there.
+//
+// Telemetry auto-capture (wayfinder #80, ADR 0014): an optional `telemetry` block, added without
+// bumping the format id -- unknown/missing fields parse fine on both sides. See `TripTelemetry`.
 import Foundation
 
 struct TripSample: Codable {
@@ -24,6 +27,47 @@ struct TripSample: Codable {
     }
 }
 
+/// Optional telemetry auto-capture block (wayfinder #80, ADR 0014 -- a delta to ADR 0009): raw
+/// start/end snapshots, not a precomputed delta -- the counters' absolute unit truth is still
+/// pending the driveway check (#81), and snapshots let a stored log be re-audited if that scaling
+/// turns out wrong. Every field is individually optional (BMS SoC stays null until #81 maps a
+/// source). Custom `encode(to:)` writes all eight keys explicitly, `null` when unknown, rather
+/// than the synthesized `encodeIfPresent` that would omit a nil key -- the schema's slots exist
+/// even for a value that never lands.
+struct TripTelemetry: Codable, Equatable {
+    let startDisplaySocPct: Double?
+    let endDisplaySocPct: Double?
+    let startBmsSocPct: Double?
+    let endBmsSocPct: Double?
+    let startCumulativeChargeKwh: Double?
+    let endCumulativeChargeKwh: Double?
+    let startCumulativeDischargeKwh: Double?
+    let endCumulativeDischargeKwh: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case startDisplaySocPct = "start_display_soc_pct"
+        case endDisplaySocPct = "end_display_soc_pct"
+        case startBmsSocPct = "start_bms_soc_pct"
+        case endBmsSocPct = "end_bms_soc_pct"
+        case startCumulativeChargeKwh = "start_cumulative_charge_kwh"
+        case endCumulativeChargeKwh = "end_cumulative_charge_kwh"
+        case startCumulativeDischargeKwh = "start_cumulative_discharge_kwh"
+        case endCumulativeDischargeKwh = "end_cumulative_discharge_kwh"
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(startDisplaySocPct, forKey: .startDisplaySocPct)
+        try container.encode(endDisplaySocPct, forKey: .endDisplaySocPct)
+        try container.encode(startBmsSocPct, forKey: .startBmsSocPct)
+        try container.encode(endBmsSocPct, forKey: .endBmsSocPct)
+        try container.encode(startCumulativeChargeKwh, forKey: .startCumulativeChargeKwh)
+        try container.encode(endCumulativeChargeKwh, forKey: .endCumulativeChargeKwh)
+        try container.encode(startCumulativeDischargeKwh, forKey: .startCumulativeDischargeKwh)
+        try container.encode(endCumulativeDischargeKwh, forKey: .endCumulativeDischargeKwh)
+    }
+}
+
 struct TripLog: Codable {
     let format: String
     let id: String
@@ -34,6 +78,9 @@ struct TripLog: Codable {
     let endSocPct: Int
     let ambientTempC: Double?
     let samples: [TripSample]
+    /// Present only when at least one telemetry field landed during the trip (wayfinder #80);
+    /// omitted entirely (not merely null) otherwise -- see `TripLogStore.confirmEndSoc`.
+    let telemetry: TripTelemetry?
 
     enum CodingKeys: String, CodingKey {
         case format, id, vehicle
@@ -43,6 +90,24 @@ struct TripLog: Codable {
         case endSocPct = "end_soc_pct"
         case ambientTempC = "ambient_temp_c"
         case samples
+        case telemetry
+    }
+
+    init(
+        format: String, id: String, vehicle: String, startUnix: Int, endUnix: Int,
+        startSocPct: Int, endSocPct: Int, ambientTempC: Double?, samples: [TripSample],
+        telemetry: TripTelemetry? = nil
+    ) {
+        self.format = format
+        self.id = id
+        self.vehicle = vehicle
+        self.startUnix = startUnix
+        self.endUnix = endUnix
+        self.startSocPct = startSocPct
+        self.endSocPct = endSocPct
+        self.ambientTempC = ambientTempC
+        self.samples = samples
+        self.telemetry = telemetry
     }
 }
 

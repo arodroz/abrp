@@ -93,7 +93,7 @@ The maximum cruise speed the planner assumes for a Leg when lower than the road'
 _Avoid_: Speed adaptation, slow-down, eco speed
 
 **Trip Log**:
-The record of one real drive used to calibrate the Energy Model: an automatically captured GPS trace with timestamps and ambient temperature, plus the Display SoC read off the dash and entered by the driver at start and end.
+The record of one real drive used to calibrate the Energy Model: an automatically captured GPS trace with timestamps and ambient temperature, plus the Display SoC read off the dash and entered by the driver at start and end. When a dongle is live, the Display SoC and the car's own measured trip energy are captured automatically instead; the typed-in dash SoC remains the fallback with no dongle connected.
 _Avoid_: Drive log, telemetry, trip history
 
 **Invalid Plan**:

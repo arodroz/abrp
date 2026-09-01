@@ -2125,6 +2125,12 @@ public struct FfiTripFit: Equatable, Hashable {
      */
     public var errorPoints: Double?
     public var excludedReason: String?
+    /**
+     * `true` only when `actual_wh` came from the tlog-1 telemetry block's cumulative
+     * charge/discharge counters (ADR 0014, wayfinder #80) rather than a display-SoC-derived
+     * inference; `false` for every excluded row too.
+     */
+    public var measured: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -2137,7 +2143,12 @@ public struct FfiTripFit: Equatable, Hashable {
          * Post-refit `|predicted arrival SoC - actual arrival SoC|`, set for
          * every used trip regardless of `qualifying` (cheap, and useful UX
          * even for a trip too short to gate acceptance).
-         */errorPoints: Double?, excludedReason: String?) {
+         */errorPoints: Double?, excludedReason: String?, 
+        /**
+         * `true` only when `actual_wh` came from the tlog-1 telemetry block's cumulative
+         * charge/discharge counters (ADR 0014, wayfinder #80) rather than a display-SoC-derived
+         * inference; `false` for every excluded row too.
+         */measured: Bool) {
         self.id = id
         self.startUnix = startUnix
         self.distanceM = distanceM
@@ -2148,6 +2159,7 @@ public struct FfiTripFit: Equatable, Hashable {
         self.qualifying = qualifying
         self.errorPoints = errorPoints
         self.excludedReason = excludedReason
+        self.measured = measured
     }
 
     
@@ -2175,7 +2187,8 @@ public struct FfiConverterTypeFfiTripFit: FfiConverterRustBuffer {
                 used: FfiConverterBool.read(from: &buf), 
                 qualifying: FfiConverterBool.read(from: &buf), 
                 errorPoints: FfiConverterOptionDouble.read(from: &buf), 
-                excludedReason: FfiConverterOptionString.read(from: &buf)
+                excludedReason: FfiConverterOptionString.read(from: &buf), 
+                measured: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -2190,6 +2203,7 @@ public struct FfiConverterTypeFfiTripFit: FfiConverterRustBuffer {
         FfiConverterBool.write(value.qualifying, into: &buf)
         FfiConverterOptionDouble.write(value.errorPoints, into: &buf)
         FfiConverterOptionString.write(value.excludedReason, into: &buf)
+        FfiConverterBool.write(value.measured, into: &buf)
     }
 }
 

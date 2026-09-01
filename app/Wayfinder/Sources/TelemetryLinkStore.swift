@@ -34,6 +34,12 @@ final class TelemetryLinkStore {
     private(set) var lastReadingAt: Date?
     var liveDisplaySoc: Double? { latestReadings[.displaySoc] }
 
+    /// How stale a reading may be and still be trustworthy to WRITE somewhere (wayfinder #80):
+    /// the Trip Log telemetry snapshot and the SoC-prompt auto-fill both gate on this window via
+    /// `lastReadingAt`. Distinct from `LiveSocPresentation`'s 10s staleness badge, which is a
+    /// display concern, not a "is this worth recording" one.
+    static let snapshotFreshnessS: TimeInterval = 30
+
     /// Builds one fresh `TelemetryReadingDialogue` per poll cycle -- `nil` (no dialogue built,
     /// e.g. the bundled profile failed to load) just skips that cycle. Set once at construction
     /// in production (WayfinderApp); obd-smoke/live-soc-smoke set it directly.

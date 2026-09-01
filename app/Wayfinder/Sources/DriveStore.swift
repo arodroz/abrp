@@ -39,9 +39,15 @@
 // logged to `voiceEventLog` as a test seam that's appended to ALWAYS, mute or not, so muting
 // only silences `SpeechController`, never the assertable log.
 //
-// Live SoC (wayfinder #79): the 12V-safety gate's only writers are `enterDrive` (opens) and the
-// two ways a drive ends -- `end()` and the arrival branch in `ingest` (both close). Closing
-// always happens AFTER trip capture closes -- see the ordering comment in `end()`.
+// Live SoC (wayfinder #79) / telemetry auto-capture (wayfinder #80): the 12V-safety gate's only
+// writers are `go()` (opens, at intent-to-drive -- moved here from `enterDrive` so the link is
+// usually connected by the time the driver answers the start-SoC prompt) and three closers:
+// `resolvePendingGo()` (the Go was cancelled -- start-SoC prompt Cancel, or its denied-auth
+// refusal -- before ever entering the drive), `end()`, and the arrival branch in `ingest`. The
+// invariant this preserves: the gate is open exactly during [go() ... drive end/arrival/cancel],
+// never longer. Closing on end/arrival always happens AFTER trip capture closes -- see the
+// ordering comment in `end()`; that ordering exists FOR the end-of-trip telemetry snapshot
+// (wayfinder #80, `TripLogStore.stopTapped`), which must still be able to read `latestReadings`.
 import CoreLocation
 import Foundation
 import MapLibre
@@ -212,11 +218,20 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
     /// prompt already up) is unreachable via the UI -- alerts are modal.
     func go() {
         guard canGo, !pendingGo else { return }
+        // 12V-safety gate (wayfinder #80): opened HERE, at intent-to-drive, not at actual entry
+        // -- so the link is usually already connected by the time the driver confirms the
+        // start-SoC prompt, giving that prompt's auto-fill (and the lazy start snapshot) a fresh
+        // reading. Every path below that doesn't reach `enterDrive` must close it again.
+        telemetryStore?.gateOpen = true
         if tripStore.phase == .recording {
             enterDrive()
         } else if tripStore.phase == .idle {
             pendingGo = true
             tripStore.startTapped()
+        } else {
+            // Unreachable via the UI (alerts are modal) -- closed defensively so the gate
+            // invariant holds even here.
+            telemetryStore?.gateOpen = false
         }
     }
 
@@ -229,6 +244,10 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
         pendingGo = false
         if tripStore.phase == .recording {
             enterDrive()
+        } else {
+            // The Go was cancelled before ever entering the drive (wayfinder #80): the gate
+            // `go()` opened optimistically must close again.
+            telemetryStore?.gateOpen = false
         }
     }
 
@@ -238,8 +257,8 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
     private func enterDrive() {
         guard canGo, let plan = planStore.displayedPlan else { return }
 
-        // 12V-safety gate (wayfinder #79): only ever open while actually driving.
-        telemetryStore?.gateOpen = true
+        // 12V-safety gate (wayfinder #79/#80): already open -- `go()` opens it at
+        // intent-to-drive, before this method ever runs.
 
         // Flags reset BEFORE snapshotPlan (wayfinder #67): snapshotPlan now computes the initial
         // banner, and computeBanner mutes while `replanInFlight` -- a drive entered right after a

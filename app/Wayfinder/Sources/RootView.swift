@@ -66,6 +66,20 @@ struct RootView: View {
             .onChange(of: tripStore.lastSavedURL) { _, newValue in
                 if newValue != nil { showToast("Trip Log saved") }
             }
+            // SoC-prompt auto-fill (wayfinder #80): pre-fills with the live Display SoC, rounded,
+            // on the transition INTO a prompt only -- typing then overrides it, and absent
+            // telemetry leaves the field empty, as before this ticket.
+            .onChange(of: tripStore.phase) { _, newPhase in
+                switch newPhase {
+                case .promptingStartSoc, .promptingEndSoc:
+                    if let live = telemetryStore.liveDisplaySoc, let lastReadingAt = telemetryStore.lastReadingAt,
+                       Date().timeIntervalSince(lastReadingAt) <= TelemetryLinkStore.snapshotFreshnessS {
+                        socInputText = String(Int(live.rounded()))
+                    }
+                default:
+                    break
+                }
+            }
         return withLifecycleHandlers
             .sheet(isPresented: Binding(get: { store.showingSettings }, set: { store.showingSettings = $0 })) {
                 SettingsForm(store: store, installer: installer, tripStore: tripStore)

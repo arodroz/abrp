@@ -84,7 +84,11 @@
 // supersede-not-queue on a jump straight to a later step's "now" tier, the hard-stop-and-log on
 // off-route reroute with no voice while the banner is muted, re-deriving against the new plan
 // after a replan lands, and the explicit arrival prompt racing (and beating) the arrive step's
-// own tier.
+// own tier. `--autotest triplog-telemetry-smoke` (wayfinder #80, in AutotestTriplogTelemetry.swift)
+// scripts two full poll sweeps with different Display SoC/cumulative-counter values and proves
+// the auto-captured `telemetry` block lands the sweep-1 start values and the final-sweep end
+// values, Rust's `calibrate()` consumes the measured net-of-regen energy from the counters
+// (`measured == true`), and a telemetry-free drive still saves a tlog with no `telemetry` block.
 import CoreLocation
 import CryptoKit
 import Darwin
@@ -147,6 +151,10 @@ enum Autotest {
         case "live-soc-smoke":
             Task.detached(priority: .userInitiated) {
                 await runLiveSocSmoke()
+            }
+        case "triplog-telemetry-smoke":
+            Task.detached(priority: .userInitiated) {
+                await runTriplogTelemetrySmoke()
             }
         default:
             break
