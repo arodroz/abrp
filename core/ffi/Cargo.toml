@@ -24,6 +24,7 @@ routing = { path = "../routing" }
 energy = { path = "../energy" }
 optimiser = { path = "../optimiser" }
 guidance = { path = "../guidance" }
+telemetry = { path = "../telemetry" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Pinned exact (ADR 0004 point 6): the newest stable release on crates.io

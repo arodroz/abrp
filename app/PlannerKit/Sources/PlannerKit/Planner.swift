@@ -869,6 +869,217 @@ public func FfiConverterTypePlanner_lower(_ value: Planner) -> UInt64 {
 
 
 
+
+
+/**
+ * One profile-driven telemetry poll session (ADR 0004 point 3): the
+ * engine plus the decoder, end to end, behind the same coarse call shape
+ * as `Planner`. Interior mutability for the engine only -- `profile` and
+ * `variant` never change after construction.
+ */
+public protocol TelemetrySessionProtocol: AnyObject, Sendable {
+    
+    /**
+     * Drains every event completed since the last call, decoded into
+     * canonical/extra readings, plus one entry per failed command --
+     * batched, never per-signal (ADR 0004 point 3).
+     */
+    func drainReadings()  -> [FfiTelemetryReading]
+    
+    /**
+     * Bytes read from the adapter.
+     */
+    func feed(bytes: Data) 
+    
+    func isFinished()  -> Bool
+    
+    func onTimeout() 
+    
+    /**
+     * Bytes to write to the adapter next, or `None` if nothing is ready
+     * yet (or the session has finished).
+     */
+    func outgoing()  -> Data?
+    
+}
+/**
+ * One profile-driven telemetry poll session (ADR 0004 point 3): the
+ * engine plus the decoder, end to end, behind the same coarse call shape
+ * as `Planner`. Interior mutability for the engine only -- `profile` and
+ * `variant` never change after construction.
+ */
+open class TelemetrySession: TelemetrySessionProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_planner_ffi_fn_clone_telemetrysession(self.handle, $0) }
+    }
+    /**
+     * Loads `profile_json`, resolves `variant_id` against it, and builds
+     * the engine's poll list (`telemetry::requests_for`) -- headers,
+     * session prerequisites and all.
+     */
+public convenience init(profileJson: String, variantId: String)throws  {
+    let handle =
+        try rustCallWithError(FfiConverterTypePlannerError_lift) {
+        uniffiCallStatus in
+    uniffi_planner_ffi_fn_constructor_telemetrysession_new(
+        FfiConverterString.lower(profileJson),
+        FfiConverterString.lower(variantId),uniffiCallStatus
+    )
+}
+    self.init(unsafeFromHandle: handle)
+}
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_planner_ffi_fn_free_telemetrysession(handle, $0) }
+    }
+
+    
+
+    
+    /**
+     * Drains every event completed since the last call, decoded into
+     * canonical/extra readings, plus one entry per failed command --
+     * batched, never per-signal (ADR 0004 point 3).
+     */
+open func drainReadings() -> [FfiTelemetryReading]  {
+    return try!  FfiConverterSequenceTypeFfiTelemetryReading.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_planner_ffi_fn_method_telemetrysession_drain_readings(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Bytes read from the adapter.
+     */
+open func feed(bytes: Data)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_planner_ffi_fn_method_telemetrysession_feed(
+            self.uniffiCloneHandle(),
+        FfiConverterData.lower(bytes),uniffiCallStatus
+    )
+}
+}
+    
+open func isFinished() -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_planner_ffi_fn_method_telemetrysession_is_finished(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+open func onTimeout()  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_planner_ffi_fn_method_telemetrysession_on_timeout(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Bytes to write to the adapter next, or `None` if nothing is ready
+     * yet (or the session has finished).
+     */
+open func outgoing() -> Data?  {
+    return try!  FfiConverterOptionData.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_planner_ffi_fn_method_telemetrysession_outgoing(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+
+    
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTelemetrySession: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = TelemetrySession
+
+    public static func lift(_ handle: UInt64) throws -> TelemetrySession {
+        return TelemetrySession(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: TelemetrySession) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TelemetrySession {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: TelemetrySession, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTelemetrySession_lift(_ handle: UInt64) throws -> TelemetrySession {
+    return try FfiConverterTypeTelemetrySession.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTelemetrySession_lower(_ value: TelemetrySession) -> UInt64 {
+    return FfiConverterTypeTelemetrySession.lower(value)
+}
+
+
+
+
 /**
  * `Planner::calibrate`'s result (ADR 0009 points 3-5).
  */
@@ -1735,6 +1946,161 @@ public func FfiConverterTypeFfiStop_lower(_ value: FfiStop) -> RustBuffer {
 
 
 /**
+ * A loaded profile's summary (id/name/tier/variants), for a future
+ * profile-picker UI -- no engine or decoder constructed.
+ */
+public struct FfiTelemetryProfile: Equatable, Hashable {
+    public var id: String
+    public var name: String
+    public var tier: FfiValidationTier
+    public var variantIds: [String]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: String, name: String, tier: FfiValidationTier, variantIds: [String]) {
+        self.id = id
+        self.name = name
+        self.tier = tier
+        self.variantIds = variantIds
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiTelemetryProfile: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiTelemetryProfile: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiTelemetryProfile {
+        return
+            try FfiTelemetryProfile(
+                id: FfiConverterString.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf), 
+                tier: FfiConverterTypeFfiValidationTier.read(from: &buf), 
+                variantIds: FfiConverterSequenceString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiTelemetryProfile, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterTypeFfiValidationTier.write(value.tier, into: &buf)
+        FfiConverterSequenceString.write(value.variantIds, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTelemetryProfile_lift(_ buf: RustBuffer) throws -> FfiTelemetryProfile {
+    return try FfiConverterTypeFfiTelemetryProfile.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTelemetryProfile_lower(_ value: FfiTelemetryProfile) -> RustBuffer {
+    return FfiConverterTypeFfiTelemetryProfile.lower(value)
+}
+
+
+/**
+ * One entry out of `TelemetrySession::drainReadings`, batched (never a
+ * per-signal call): a canonical-signal reading (`canonical_signal` set),
+ * a raw named extra otherwise (`name` is the profile's native signal id;
+ * `text_value` carries an OBDb `map`-decoded label when the extra isn't
+ * numeric -- ADR 0013 point 3: unmapped native signals are never
+ * dropped), or a failed command (`failure_reason` set; the other fields
+ * are placeholders on that entry).
+ */
+public struct FfiTelemetryReading: Equatable, Hashable {
+    public var canonicalSignal: FfiCanonicalSignal?
+    /**
+     * 1-based cell/module number for `CellVoltage`/`ModuleTemperature`.
+     */
+    public var index: UInt32?
+    public var name: String
+    public var value: Double?
+    public var textValue: String?
+    public var unit: String
+    public var failureReason: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(canonicalSignal: FfiCanonicalSignal?, 
+        /**
+         * 1-based cell/module number for `CellVoltage`/`ModuleTemperature`.
+         */index: UInt32?, name: String, value: Double?, textValue: String?, unit: String, failureReason: String?) {
+        self.canonicalSignal = canonicalSignal
+        self.index = index
+        self.name = name
+        self.value = value
+        self.textValue = textValue
+        self.unit = unit
+        self.failureReason = failureReason
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiTelemetryReading: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiTelemetryReading: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiTelemetryReading {
+        return
+            try FfiTelemetryReading(
+                canonicalSignal: FfiConverterOptionTypeFfiCanonicalSignal.read(from: &buf), 
+                index: FfiConverterOptionUInt32.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf), 
+                value: FfiConverterOptionDouble.read(from: &buf), 
+                textValue: FfiConverterOptionString.read(from: &buf), 
+                unit: FfiConverterString.read(from: &buf), 
+                failureReason: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiTelemetryReading, into buf: inout [UInt8]) {
+        FfiConverterOptionTypeFfiCanonicalSignal.write(value.canonicalSignal, into: &buf)
+        FfiConverterOptionUInt32.write(value.index, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterOptionDouble.write(value.value, into: &buf)
+        FfiConverterOptionString.write(value.textValue, into: &buf)
+        FfiConverterString.write(value.unit, into: &buf)
+        FfiConverterOptionString.write(value.failureReason, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTelemetryReading_lift(_ buf: RustBuffer) throws -> FfiTelemetryReading {
+    return try FfiConverterTypeFfiTelemetryReading.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTelemetryReading_lower(_ value: FfiTelemetryReading) -> RustBuffer {
+    return FfiConverterTypeFfiTelemetryReading.lower(value)
+}
+
+
+/**
  * One Trip Log's fit result (ADR 0009 points 3-5), whether or not it was
  * used: an excluded trip still gets a row (`used == false`,
  * `excluded_reason` set), so the caller can show why.
@@ -1902,6 +2268,160 @@ public func FfiConverterTypeFfiWaypoint_lift(_ buf: RustBuffer) throws -> FfiWay
 public func FfiConverterTypeFfiWaypoint_lower(_ value: FfiWaypoint) -> RustBuffer {
     return FfiConverterTypeFfiWaypoint.lower(value)
 }
+
+
+/**
+ * Mirrors `telemetry::CanonicalSignal` 1:1 (`CONTEXT.md` "Canonical
+ * Signal").
+ */
+
+public enum FfiCanonicalSignal: Equatable, Hashable {
+    
+    case bmsSoc
+    case displaySoc
+    case packCurrent
+    case packVoltage
+    case cellVoltage
+    case moduleTemperature
+    case soh
+    case remainingEnergy
+    case cumulativeChargeEnergy
+    case cumulativeDischargeEnergy
+    case cumulativeChargeAh
+    case cumulativeDischargeAh
+    case aux12vVoltage
+    case odometer
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FfiCanonicalSignal: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiCanonicalSignal: FfiConverterRustBuffer {
+    typealias SwiftType = FfiCanonicalSignal
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiCanonicalSignal {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .bmsSoc
+        
+        case 2: return .displaySoc
+        
+        case 3: return .packCurrent
+        
+        case 4: return .packVoltage
+        
+        case 5: return .cellVoltage
+        
+        case 6: return .moduleTemperature
+        
+        case 7: return .soh
+        
+        case 8: return .remainingEnergy
+        
+        case 9: return .cumulativeChargeEnergy
+        
+        case 10: return .cumulativeDischargeEnergy
+        
+        case 11: return .cumulativeChargeAh
+        
+        case 12: return .cumulativeDischargeAh
+        
+        case 13: return .aux12vVoltage
+        
+        case 14: return .odometer
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiCanonicalSignal, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .bmsSoc:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .displaySoc:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .packCurrent:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .packVoltage:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .cellVoltage:
+            writeInt(&buf, Int32(5))
+        
+        
+        case .moduleTemperature:
+            writeInt(&buf, Int32(6))
+        
+        
+        case .soh:
+            writeInt(&buf, Int32(7))
+        
+        
+        case .remainingEnergy:
+            writeInt(&buf, Int32(8))
+        
+        
+        case .cumulativeChargeEnergy:
+            writeInt(&buf, Int32(9))
+        
+        
+        case .cumulativeDischargeEnergy:
+            writeInt(&buf, Int32(10))
+        
+        
+        case .cumulativeChargeAh:
+            writeInt(&buf, Int32(11))
+        
+        
+        case .cumulativeDischargeAh:
+            writeInt(&buf, Int32(12))
+        
+        
+        case .aux12vVoltage:
+            writeInt(&buf, Int32(13))
+        
+        
+        case .odometer:
+            writeInt(&buf, Int32(14))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiCanonicalSignal_lift(_ buf: RustBuffer) throws -> FfiCanonicalSignal {
+    return try FfiConverterTypeFfiCanonicalSignal.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiCanonicalSignal_lower(_ value: FfiCanonicalSignal) -> RustBuffer {
+    return FfiConverterTypeFfiCanonicalSignal.lower(value)
+}
+
 
 
 /**
@@ -2129,6 +2649,82 @@ public func FfiConverterTypeFfiManeuverModifier_lift(_ buf: RustBuffer) throws -
 #endif
 public func FfiConverterTypeFfiManeuverModifier_lower(_ value: FfiManeuverModifier) -> RustBuffer {
     return FfiConverterTypeFfiManeuverModifier.lower(value)
+}
+
+
+
+/**
+ * Mirrors `telemetry::ValidationTier` 1:1.
+ */
+
+public enum FfiValidationTier: Equatable, Hashable {
+    
+    case carValidated
+    case vectorValidated
+    case paper
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FfiValidationTier: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiValidationTier: FfiConverterRustBuffer {
+    typealias SwiftType = FfiValidationTier
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiValidationTier {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .carValidated
+        
+        case 2: return .vectorValidated
+        
+        case 3: return .paper
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiValidationTier, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .carValidated:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .vectorValidated:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .paper:
+            writeInt(&buf, Int32(3))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiValidationTier_lift(_ buf: RustBuffer) throws -> FfiValidationTier {
+    return try FfiConverterTypeFfiValidationTier.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiValidationTier_lower(_ value: FfiValidationTier) -> RustBuffer {
+    return FfiConverterTypeFfiValidationTier.lower(value)
 }
 
 
@@ -2392,6 +2988,30 @@ fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionData: FfiConverterRustBuffer {
+    typealias SwiftType = Data?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterData.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterData.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeFfiPlanAlt: FfiConverterRustBuffer {
     typealias SwiftType = FfiPlanAlt?
 
@@ -2408,6 +3028,30 @@ fileprivate struct FfiConverterOptionTypeFfiPlanAlt: FfiConverterRustBuffer {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeFfiPlanAlt.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeFfiCanonicalSignal: FfiConverterRustBuffer {
+    typealias SwiftType = FfiCanonicalSignal?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeFfiCanonicalSignal.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeFfiCanonicalSignal.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -2566,6 +3210,31 @@ fileprivate struct FfiConverterSequenceTypeFfiStop: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeFfiTelemetryReading: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiTelemetryReading]
+
+    public static func write(_ value: [FfiTelemetryReading], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiTelemetryReading.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiTelemetryReading] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiTelemetryReading]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFfiTelemetryReading.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeFfiTripFit: FfiConverterRustBuffer {
     typealias SwiftType = [FfiTripFit]
 
@@ -2626,6 +3295,17 @@ public func verifyRegionPack(path: String)throws   {try rustCallWithError(FfiCon
     )
 }
 }
+/**
+ * Parses and validates a `tprof-1` document, returning its summary.
+ */
+public func loadTelemetryProfile(json: String)throws  -> FfiTelemetryProfile  {
+    return try  FfiConverterTypeFfiTelemetryProfile_lift(try rustCallWithError(FfiConverterTypePlannerError_lift) {
+        uniffiCallStatus in
+    uniffi_planner_ffi_fn_func_load_telemetry_profile(
+        FfiConverterString.lower(json),uniffiCallStatus
+    )
+})
+}
 
 private enum InitializationResult {
     case ok
@@ -2645,6 +3325,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_planner_ffi_checksum_func_verify_region_pack() != 59219) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_planner_ffi_checksum_func_load_telemetry_profile() != 54775) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_planner_ffi_checksum_method_planner_calibrate() != 19204) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -2660,7 +3343,25 @@ private let initializationResult: InitializationResult = {
     if (uniffi_planner_ffi_checksum_method_planner_plan() != 65393) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_planner_ffi_checksum_method_telemetrysession_drain_readings() != 39536) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_planner_ffi_checksum_method_telemetrysession_feed() != 52941) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_planner_ffi_checksum_method_telemetrysession_is_finished() != 29388) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_planner_ffi_checksum_method_telemetrysession_on_timeout() != 31695) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_planner_ffi_checksum_method_telemetrysession_outgoing() != 48306) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_planner_ffi_checksum_constructor_planner_new() != 33953) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_planner_ffi_checksum_constructor_telemetrysession_new() != 59744) {
         return InitializationResult.apiChecksumMismatch
     }
 

@@ -1,0 +1,155 @@
+{
+  "format": "tprof-1",
+  "id": "kia-ev6",
+  "name": "Kia EV6 (2022+, E-GMP)",
+  "vehicle_tags": ["kia_ev6"],
+  "tier": "paper",
+  "provenance": "Paper profile (ADR 0013 point 4): the EV6 shares the Hyundai Ioniq 5's E-GMP BMS/ICCU decode layout per docs/research/ioniq5-obd-telemetry.md §4 (OVMS's vehicle_hyundai_ioniq5 module and evDash's CarHyundaiEgmp parser both serve Ioniq 5 and EV6 jointly from one decoder). Every command and signal below is copied unchanged from data/profiles/hyundai-ioniq5.tprof.json -- ZERO changes to core/telemetry's Rust code were needed to add this vehicle (wayfinder #77's modularity proof); only the metadata and pack_variants below differ. Not vector-validated: no OBDb EV6 test vectors were imported for this ticket, and this profile has not been checked against a real car. Pack options (58 kWh / 77.4 kWh, no 72.6 or 84 kWh trim) confirmed against OBDb/Kia-EV6's generations.yaml (github.com/OBDb/Kia-EV6, CC-BY-SA-4.0, fact only, no file copied).",
+  "pack_variants": [
+    {
+      "id": "58_kwh",
+      "name": "58 kWh Standard Range",
+      "populated_cells": 144,
+      "usable_capacity_kwh": 58.0,
+      "nominal_capacity_kwh": 58.0,
+      "remaining_energy_ceiling_kwh": 58.0,
+      "notes": "Paper: cell count assumed identical to the Ioniq 5's same-capacity variant (shared E-GMP pack architecture); not independently confirmed for the EV6."
+    },
+    {
+      "id": "77_4_kwh",
+      "name": "77.4 kWh Long Range",
+      "populated_cells": 192,
+      "usable_capacity_kwh": 77.4,
+      "nominal_capacity_kwh": 77.4,
+      "remaining_energy_ceiling_kwh": 77.0,
+      "notes": "Paper: cell count assumed identical to the Ioniq 5's same-capacity variant (shared E-GMP pack architecture); not independently confirmed for the EV6."
+    }
+  ],
+  "commands": [
+    {
+      "tx_header": "7E4",
+      "rx_header": "7EC",
+      "request_hex": "220101",
+      "freq_s": 1.0,
+      "signals": [
+        {"id": "hvbat_soc_dashboard", "name": "HV battery charge (dashboard)", "canonical": "display_soc", "bix": 32, "len": 8, "div": 2, "min": 0, "max": 100, "unit": "percent"},
+        {"id": "bms_main_relay", "name": "BMS main relay", "bix": 79, "len": 1, "max": 1, "unit": "scalar", "map": {"0": "open", "1": "closed"}},
+        {"id": "battery_current", "name": "Battery current", "canonical": "pack_current", "bix": 80, "len": 16, "sign": true, "div": 10, "min": -230, "max": 230, "unit": "amps"},
+        {"id": "battery_max_t", "name": "Battery max temperature", "bix": 112, "len": 8, "sign": true, "min": -40, "max": 80, "unit": "celsius"},
+        {"id": "battery_min_t", "name": "Battery min temperature", "bix": 120, "len": 8, "sign": true, "min": -40, "max": 80, "unit": "celsius"},
+        {"id": "battery_pack_temp", "name": "Battery module temperature (01-05)", "canonical": "module_temperature", "bix": 128, "len": 8, "sign": true, "min": -40, "max": 80, "count": 5, "first_index": 1, "unit": "celsius"},
+        {"id": "maximum_cell_voltage", "name": "Maximum cell voltage", "bix": 184, "len": 8, "div": 50, "min": 2.8, "max": 4.2, "unit": "volts"},
+        {"id": "maximum_cell_voltage_no", "name": "Maximum cell voltage, cell number", "bix": 192, "len": 8, "max": 98, "unit": "scalar"},
+        {"id": "minimum_cell_voltage", "name": "Minimum cell voltage", "bix": 200, "len": 8, "div": 50, "min": 2.8, "max": 4.2, "unit": "volts"},
+        {"id": "minimum_cell_voltage_no", "name": "Minimum cell voltage, cell number", "bix": 208, "len": 8, "max": 98, "unit": "scalar"},
+        {"id": "auxillary_battery_voltage", "name": "Auxiliary (12V) battery voltage", "canonical": "aux_12v_voltage", "bix": 232, "len": 8, "div": 10, "min": 11, "max": 14.6, "unit": "volts"},
+        {"id": "cumulative_charge_ah", "name": "Cumulative charge", "canonical": "cumulative_charge_ah", "bix": 240, "len": 32, "div": 10, "max": 100000, "unit": "ampereHours"},
+        {"id": "cumulative_discharge_ah", "name": "Cumulative discharge", "canonical": "cumulative_discharge_ah", "bix": 272, "len": 32, "div": 10, "max": 100000, "unit": "ampereHours"},
+        {"id": "cumulative_energy_charged", "name": "Cumulative energy charged", "canonical": "cumulative_charge_energy", "bix": 304, "len": 32, "div": 10, "max": 100000, "unit": "kilowattHours"},
+        {"id": "cumulative_energy_discharged", "name": "Cumulative energy discharged", "canonical": "cumulative_discharge_energy", "bix": 336, "len": 32, "div": 10, "max": 100000, "unit": "kilowattHours"},
+        {"id": "battery_work_time_total_sec", "name": "Battery total work time", "bix": 368, "len": 32, "max": 4294967295, "unit": "seconds"}
+      ]
+    },
+    {
+      "tx_header": "7E4",
+      "rx_header": "7EC",
+      "request_hex": "220102",
+      "freq_s": 1.0,
+      "signals": [
+        {"id": "cell_voltage_1_32", "name": "Cell voltage (001-032)", "canonical": "cell_voltage", "bix": 32, "len": 8, "div": 50, "min": 0, "max": 5.1, "count": 32, "first_index": 1, "unit": "volts"}
+      ]
+    },
+    {
+      "tx_header": "7E4",
+      "rx_header": "7EC",
+      "request_hex": "220103",
+      "freq_s": 1.0,
+      "signals": [
+        {"id": "cell_voltage_33_64", "name": "Cell voltage (033-064)", "canonical": "cell_voltage", "bix": 32, "len": 8, "div": 50, "min": 0, "max": 5.1, "count": 32, "first_index": 33, "unit": "volts"}
+      ]
+    },
+    {
+      "tx_header": "7E4",
+      "rx_header": "7EC",
+      "request_hex": "220104",
+      "freq_s": 1.0,
+      "signals": [
+        {"id": "cell_voltage_65_96", "name": "Cell voltage (065-096)", "canonical": "cell_voltage", "bix": 32, "len": 8, "div": 50, "min": 0, "max": 5.1, "count": 32, "first_index": 65, "unit": "volts"}
+      ]
+    },
+    {
+      "tx_header": "7E4",
+      "rx_header": "7EC",
+      "request_hex": "22010A",
+      "freq_s": 1.0,
+      "signals": [
+        {"id": "cell_voltage_97_128", "name": "Cell voltage (097-128)", "canonical": "cell_voltage", "bix": 32, "len": 8, "div": 50, "min": 0, "max": 5.1, "count": 32, "first_index": 97, "unit": "volts"}
+      ]
+    },
+    {
+      "tx_header": "7E4",
+      "rx_header": "7EC",
+      "request_hex": "22010B",
+      "freq_s": 1.0,
+      "signals": [
+        {"id": "cell_voltage_129_160", "name": "Cell voltage (129-160)", "canonical": "cell_voltage", "bix": 32, "len": 8, "div": 50, "min": 0, "max": 5.1, "count": 32, "first_index": 129, "unit": "volts"}
+      ]
+    },
+    {
+      "tx_header": "7E4",
+      "rx_header": "7EC",
+      "request_hex": "22010C",
+      "freq_s": 1.0,
+      "signals": [
+        {"id": "cell_voltage_161_192", "name": "Cell voltage (161-192)", "canonical": "cell_voltage", "bix": 32, "len": 8, "div": 50, "min": 0, "max": 5.1, "count": 32, "first_index": 161, "unit": "volts"}
+      ]
+    },
+    {
+      "tx_header": "7E4",
+      "rx_header": "7EC",
+      "request_hex": "220105",
+      "freq_s": 1.0,
+      "signals": [
+        {"id": "hvbat_soh", "name": "HV battery state of health", "canonical": "soh", "bix": 200, "len": 16, "div": 10, "min": 0, "max": 100, "unit": "percent"},
+        {"id": "hvbat_remaining_energy", "name": "HV battery remaining energy at current SoC", "canonical": "remaining_energy", "bix": 224, "len": 16, "mul": 2, "div": 1000, "min": 0, "max": 100, "unit": "kilowattHours"},
+        {"id": "hvbat_soc_disp", "name": "HV battery charge (secondary reading)", "bix": 248, "len": 8, "div": 2, "min": 0, "max": 100, "unit": "percent"}
+      ]
+    },
+    {
+      "tx_header": "7E4",
+      "rx_header": "7EC",
+      "request_hex": "220111",
+      "freq_s": 1.0,
+      "signals": [
+        {"id": "battery_pack_temp_high", "name": "Battery module temperature (17-18)", "canonical": "module_temperature", "bix": 208, "len": 8, "sign": true, "min": -40, "max": 80, "count": 2, "first_index": 17, "unit": "celsius"}
+      ]
+    },
+    {
+      "tx_header": "7C6",
+      "rx_header": "7CE",
+      "request_hex": "22B002",
+      "freq_s": 5.0,
+      "signals": [
+        {"id": "odo_km", "name": "Odometer (km)", "canonical": "odometer", "bix": 48, "len": 24, "max": 16777215, "unit": "kilometers"},
+        {"id": "odo_mi", "name": "Odometer (mi)", "bix": 72, "len": 24, "max": 16777215, "unit": "miles"}
+      ]
+    },
+    {
+      "tx_header": "7E5",
+      "rx_header": "7ED",
+      "request_hex": "22E011",
+      "session_prerequisite_hex": "1003",
+      "freq_s": 1.0,
+      "signals": [
+        {"id": "ldc_t", "name": "LDC (12V DC-DC converter) temperature", "bix": 72, "len": 8, "add": -100, "min": -100, "max": 155, "unit": "celsius"},
+        {"id": "ldc_output_voltage", "name": "LDC output voltage", "bix": 80, "len": 16, "div": 1000, "min": 0, "max": 65.535, "unit": "volts"},
+        {"id": "ldc_output_current", "name": "LDC output current", "bix": 96, "len": 16, "mul": 10, "div": 1000, "min": 0, "max": 655.35, "unit": "amps"},
+        {"id": "ldc_input_voltage", "name": "LDC input voltage (HV bus)", "canonical": "pack_voltage", "bix": 112, "len": 16, "div": 10, "min": 0, "max": 6553.5, "unit": "volts"},
+        {"id": "aux_battery_current", "name": "Auxiliary battery current", "bix": 144, "len": 16, "div": 100, "add": -327, "min": -327, "max": 328.35, "unit": "amps"},
+        {"id": "aux_battery_soc", "name": "Auxiliary battery state of charge", "bix": 160, "len": 8, "min": 0, "max": 100, "unit": "percent"},
+        {"id": "aux_battery_voltage_iccu", "name": "Auxiliary battery voltage (ICCU)", "bix": 168, "len": 16, "div": 1000, "add": 6, "min": 6, "max": 71.535, "unit": "volts"},
+        {"id": "aux_battery_t", "name": "Auxiliary battery temperature", "bix": 184, "len": 16, "div": 2, "add": -40, "min": -40, "max": 32727.5, "unit": "celsius"}
+      ]
+    }
+  ]
+}

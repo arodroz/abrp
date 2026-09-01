@@ -1,0 +1,76 @@
+{
+  "source_repo": "https://github.com/OBDb/Hyundai-IONIQ-5",
+  "source_commit": "3bdd66815fd499d015470256234b28877291730f",
+  "command_id": "7C6.7CE.22B002|fc=1",
+  "tx_header": "7C6",
+  "rx_header": "7CE",
+  "request_hex": "22B002",
+  "cases": [
+    {
+      "response_lines": [
+        "7CE 10 0F 62 B0 02 D0 00 00 ",
+        "7CE 21 00 FF AD 00 00 00 01 ",
+        "7CE 22 0F 26 AA AA AA AA AA "
+      ],
+      "expected_values": {
+        "IONIQ5_ODO_KM": 0.0,
+        "IONIQ5_ODO_MI": 69414.0
+      }
+    },
+    {
+      "response_lines": [
+        "7CE100F62B002D00000",
+        "7CE2100FFB700000000",
+        "7CE222631AAAAAAAAAA"
+      ],
+      "expected_values": {
+        "IONIQ5_ODO_KM": 0.0,
+        "IONIQ5_ODO_MI": 9777.0
+      }
+    },
+    {
+      "response_lines": [
+        "7CE100F62B002D00000",
+        "7CE2100FFB700000000",
+        "7CE222632AAAAAAAAAA"
+      ],
+      "expected_values": {
+        "IONIQ5_ODO_KM": 0.0,
+        "IONIQ5_ODO_MI": 9778.0
+      }
+    },
+    {
+      "response_lines": [
+        "7CE100F62B002D00000",
+        "7CE2100FF8F00000000",
+        "7CE226DFCAAAAAAAAAA"
+      ],
+      "expected_values": {
+        "IONIQ5_ODO_KM": 0.0,
+        "IONIQ5_ODO_MI": 28156.0
+      }
+    },
+    {
+      "response_lines": [
+        "7CE100F62B002D00000",
+        "7CE2100FF9000000000",
+        "7CE226DFCAAAAAAAAAA"
+      ],
+      "expected_values": {
+        "IONIQ5_ODO_KM": 0.0,
+        "IONIQ5_ODO_MI": 28156.0
+      }
+    },
+    {
+      "response_lines": [
+        "7CE100F62B002D00000",
+        "7CE2100FF9300000001",
+        "7CE22036EAAAAAAAAAA"
+      ],
+      "expected_values": {
+        "IONIQ5_ODO_KM": 0.0,
+        "IONIQ5_ODO_MI": 66414.0
+      }
+    }
+  ]
+}

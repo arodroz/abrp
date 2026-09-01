@@ -7,11 +7,16 @@
 mod error;
 mod mapping;
 mod planner;
+mod telemetry;
 mod triplog;
 mod types;
 
 pub use error::PlannerError;
 pub use planner::{verify_region_pack, Planner};
+pub use telemetry::{
+    load_telemetry_profile, FfiCanonicalSignal, FfiTelemetryProfile, FfiTelemetryReading,
+    FfiValidationTier, TelemetrySession,
+};
 pub use types::{
     FfiCalibrationResult, FfiGeoPoint, FfiLeg, FfiLegInput, FfiPlan, FfiPlanAlt, FfiPlanRequest,
     FfiSocPoint, FfiStop, FfiTripFit, FfiVehicle, FfiWaypoint,

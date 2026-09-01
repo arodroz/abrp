@@ -3,3 +3,20 @@ name = "telemetry"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+
+# Mechanical OBDb test-vector importer (wayfinder #77, licensing lane 2 --
+# ADR 0013 point 4). Mirrors how `core/ffi` feature-gates its `cli` bins: a
+# normal library/xcframework build never activates `import-tools`, so
+# `serde_yaml` never enters that build graph.
+[[bin]]
+name = "import_obdb_vectors"
+path = "src/bin/import_obdb_vectors.rs"
+required-features = ["import-tools"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = { version = "0.9", optional = true }
+
+[features]
+import-tools = ["dep:serde_yaml"]
