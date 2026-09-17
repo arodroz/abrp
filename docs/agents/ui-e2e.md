@@ -29,3 +29,28 @@ Verifying it is a UI-scripting exercise; the recipe that actually works:
 - **A tapped icon that bounces back to the previous app + a `CarPlayTemplateUIHost` crash log** means the system host died, not the app. The iOS 26.4 runtime's host crashes on any root `CPMapTemplate` (`-[CPSTemplateInstance vehicleSupportsDestinationSharing]: unrecognized selector`), which is why `CarPlaySceneDelegate` sets no root template. After that crash the dashboard can wedge (frozen clock) — recover with the detach/re-attach cure above.
 
 Sim screenshots proving the surface (home icon, mid-drive banner + HUD, idle pack map): `docs/research/carplay-sim/`.
+
+## Replaying a Trip Log (wayfinder #87)
+
+Feeds a recorded Trip Log into Drive Mode at the desk (real timing, scaled), so the Follow Camera and other drive-time work can be judged against a real recorded drive instead of the synthetic `-simulatedDriveDistancesM` fix train. Two launch arguments, read the same way as `-simulatedLocationFix`:
+
+- `-replayTripLog <path>`: an absolute path (Simulator can read Mac paths) or a bare filename resolved inside the app's `Documents/trip-logs/` directory (where real logs pulled off the phone already live).
+- `-replaySpeed <double>`: time multiplier, default 10.
+
+`PlanStore.load()` decodes the log, adopts its first sample as the origin (same `adoptLocationFixAsOriginIfEligible` path a real location fix uses), and sets its last sample as the destination once the planner is ready. Example, from the repo root, using the untracked 2026-09-02 corridor drive:
+
+```
+xcrun simctl launch <SIMULATOR_UUID> org.anteras.wayfinder \
+  -replayTripLog "$(pwd)/.trip-logs/tlog-1788327781-DA35087B.json" -replaySpeed 30
+```
+
+On the phone, pass just the filename (`-replayTripLog tlog-1788327781-DA35087B.json`) — it resolves inside the on-device `Documents/trip-logs/`.
+
+Once the plan lands, tap **Go** and confirm the start SoC as usual; `DriveStore.enterDrive` then spawns a Task that walks the log's samples in order, building a `CLLocation` per sample (coordinate, `alt_m`, `hacc_m`, `speed_mps`, course from the bearing between consecutive samples) and feeding it to `ingest`, sleeping between samples for the real recorded interval divided by `-replaySpeed`. It prints a start line (sample count + speed) and an end line to the console.
+
+Caveats:
+
+- **The destination must fall inside the installed pack**, or planning fails ("No route found — outside pack region?"). The 2026-09-02 log's last sample (48.547, 4.190) is well outside the `corridor`/`lu-dev` packs — only its first ~half (up to t≈7413s, index 6741, 49.400/5.627) is. Use a log (or a trimmed copy) whose last sample lands in the active pack, or install a wider pack (`eu-west`).
+- **The replayed trace was a real, complex drive, not the straight route the planner computes between its first/last sample** — expect off-route replans (ADR 0012 point 6) during a long replay, same as any real drive that deviates from its plan.
+- **No Trip Log is recorded for a replayed drive**: `TripLogStore` reads `-replayTripLog` at init and skips its save on End/arrival, so replays never pollute `Documents/trip-logs/` with synthetic calibration data.
+- There is no UI-injection path for tapping Go on the Simulator (see above); `--autotest replay-demo` supplies it for automated/console verification — it plans and drives exactly like a real replay, only substituting the Go tap.

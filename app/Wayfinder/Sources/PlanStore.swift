@@ -212,6 +212,10 @@ final class PlanStore: NSObject, @preconcurrency MLNMapViewDelegate, @preconcurr
     private var loadGeneration = 0
     private var originOverridden = false
     private var hasSetOriginFromLocationFix = false
+    /// `-replayTripLog` seam (wayfinder #87): the log's last sample, staged in `load()` and set
+    /// as the destination once the planner is ready (`didLoad`) -- `setDestination`'s replan
+    /// requires `plannerStatus == .ready`, which isn't true yet at `load()`'s synchronous entry.
+    private var pendingReplayDestination: CLLocationCoordinate2D?
     private var originAnnotation: MLNPointAnnotation?
     private var scrubAnnotation: MLNPointAnnotation?
     private let locationManager = CLLocationManager()
@@ -309,6 +313,24 @@ final class PlanStore: NSObject, @preconcurrency MLNMapViewDelegate, @preconcurr
             }
         }
 
+        // Trip Log replay harness seam (wayfinder #87): `-replayTripLog <path>` plans the
+        // recorded drive's first sample as origin, through the same adoption path as
+        // `-simulatedLocationFix` above (never `setOrigin`), and stages its last sample as the
+        // destination -- set once the planner is ready, below. `<path>` is either absolute
+        // (Simulator can read Mac paths) or a bare filename inside Documents/trip-logs/, where
+        // real logs pulled off the phone already live. The replay Task that feeds these samples
+        // into `ingest` on a timer lives in DriveStore's enterDrive, mirroring
+        // `-simulatedDriveDistancesM`.
+        if let raw = UserDefaults.standard.string(forKey: "replayTripLog") {
+            let url = TripLogStorage.resolveReplayPath(raw)
+            if let data = try? Data(contentsOf: url),
+                let log = try? JSONDecoder().decode(TripLog.self, from: data),
+                let first = log.samples.first, let last = log.samples.last {
+                adoptLocationFixAsOriginIfEligible(CLLocationCoordinate2D(latitude: first.lat, longitude: first.lon))
+                pendingReplayDestination = CLLocationCoordinate2D(latitude: last.lat, longitude: last.lon)
+            }
+        }
+
         guard let located = Packs.locate(region: activeRegion) else {
             packStatus = .missing
             return
@@ -341,6 +363,10 @@ final class PlanStore: NSObject, @preconcurrency MLNMapViewDelegate, @preconcurr
         chargerCount = chargers.count
         plannerStatus = .ready
         addChargersLayerIfPossible()
+        if let coordinate = pendingReplayDestination {
+            pendingReplayDestination = nil
+            setDestination(name: "Trip Log replay", coordinate: coordinate)
+        }
     }
 
     private func didFail(error: Error, gen: Int) {

@@ -122,7 +122,10 @@ enum RouteSnap {
     }
 
     /// Initial great-circle bearing from `a` to `b`, in degrees clockwise from true north.
-    private static func bearingDeg(from a: CLLocationCoordinate2D, to b: CLLocationCoordinate2D) -> Double {
+    /// Internal, not private (wayfinder #87): the Trip Log replay harness reuses this to derive
+    /// each replayed fix's course from consecutive samples, same reasoning as `project`/
+    /// `closestPointOnSegment` above.
+    static func bearingDeg(from a: CLLocationCoordinate2D, to b: CLLocationCoordinate2D) -> Double {
         let lat1 = a.latitude * .pi / 180
         let lat2 = b.latitude * .pi / 180
         let dLon = (b.longitude - a.longitude) * .pi / 180

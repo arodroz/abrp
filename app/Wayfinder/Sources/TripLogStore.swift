@@ -74,6 +74,10 @@ final class TripLogStore: NSObject, @preconcurrency CLLocationManagerDelegate {
     /// Captured at `stopTapped`, the moment recording stops -- DriveStore's gate-close ordering
     /// guarantees readings are still present then (wayfinder #80).
     private var endTelemetry: TripTelemetrySnapshot?
+    /// `-replayTripLog` seam (wayfinder #87): true for the lifetime of a replay launch, so
+    /// `confirmEndSoc` skips its save -- a replayed drive must never be recorded as a new Trip
+    /// Log alongside the real calibration drives pulled off the phone.
+    private let skipSaveForReplay = UserDefaults.standard.string(forKey: "replayTripLog") != nil
 
     override init() {
         super.init()
@@ -160,6 +164,9 @@ final class TripLogStore: NSObject, @preconcurrency CLLocationManagerDelegate {
         let capturedTelemetry = Self.telemetryBlock(start: startTelemetry, end: endTelemetry)
         startTelemetry = nil
         endTelemetry = nil
+        // wayfinder #87: a replayed drive must not be recorded as a new Trip Log -- those files
+        // are real calibration drives pulled off the phone.
+        guard !skipSaveForReplay else { return }
 
         Task {
             let ambientTempC = await midpointTemperature(samples: capturedSamples, startUnix: startUnix)

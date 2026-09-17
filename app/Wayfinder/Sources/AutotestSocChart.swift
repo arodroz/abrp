@@ -246,4 +246,52 @@ extension Autotest {
         driveStore.driveCardExpanded = true
         print("AUTOTEST chart-demo-drive READY")
     }
+
+    /// `--autotest replay-demo` (wayfinder #87, verification only -- reviewer-facing, same
+    /// READY-line convention as chart-demo-drive above): `-replayTripLog`/`-replaySpeed` already
+    /// do all the real work via PlanStore.load() (plan from the log's first/last sample) and
+    /// DriveStore.enterDrive (feed the log's samples into `ingest` on real timing) -- this mode
+    /// only supplies the Go tap XCUITest can't inject, the same go()/confirmStartSoc/
+    /// resolvePendingGo dance drive-smoke uses.
+    @MainActor
+    static func runReplayDemo(store: PlanStore, tripStore: TripLogStore, driveStore: DriveStore) async {
+        tripStore.authorizationStatus = { .authorizedWhenInUse }
+        tripStore.fetchTemperature = { _, _, _ in 15.0 }
+
+        store.load()
+        let ready = await waitWithTimeout(seconds: 30) { store.plannerStatus == .ready }
+        report("planner-ready", ready)
+        guard ready else { await finish(ok: false, sleepSeconds: 8) }
+
+        let planLanded = await waitWithTimeout(seconds: 30) { store.plan != nil }
+        report("plan-landed", planLanded)
+        guard planLanded else { await finish(ok: false, sleepSeconds: 8) }
+
+        // So this mode can assert no new Trip Log lands for the replayed drive (wayfinder #87
+        // point 4) without disturbing any pre-existing ones -- same idiom as drive-smoke.
+        let preexistingLogs = Set(TripLogStorage.list())
+
+        driveStore.go()
+        tripStore.confirmStartSoc(80)
+        driveStore.resolvePendingGo()
+        let entered = driveStore.phase == .driving
+        report("entered", entered, "phase=\(driveStore.phase) canGo-was=\(driveStore.canGo)")
+        guard entered else { await finish(ok: false) }
+
+        print("AUTOTEST replay-demo READY")
+
+        // Runs the replay Task through to real arrival at the log's last sample (its own real
+        // timing, scaled by `-replaySpeed`), then closes the Trip capture the same way a driver
+        // confirming the end-SoC prompt would -- proving `TripLogStore.skipSaveForReplay`
+        // actually suppresses the save.
+        let arrived = await waitWithTimeout(seconds: 900) { driveStore.phase == .arrived }
+        report("arrived", arrived, "phase=\(driveStore.phase)")
+        guard arrived else { await finish(ok: false) }
+
+        tripStore.confirmEndSoc(70)
+        let noNewTripLog = await waitWithTimeout(seconds: 5) { Set(TripLogStorage.list()) == preexistingLogs }
+        report("no-trip-log-saved-for-replay", noNewTripLog, "logs=\(TripLogStorage.list().count)")
+
+        await finish(ok: noNewTripLog)
+    }
 }

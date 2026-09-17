@@ -193,6 +193,10 @@ enum Autotest {
             Task.detached(priority: .userInitiated) {
                 await runMapDemoRoute(store: store)
             }
+        case "replay-demo":
+            Task.detached(priority: .userInitiated) {
+                await runReplayDemo(store: store, tripStore: tripStore, driveStore: driveStore)
+            }
         default:
             break
         }

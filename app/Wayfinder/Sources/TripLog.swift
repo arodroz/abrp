@@ -119,6 +119,13 @@ enum TripLogStorage {
         return docs.appendingPathComponent("trip-logs", isDirectory: true)
     }
 
+    /// Resolves a `-replayTripLog` launch-argument value (wayfinder #87): an absolute path
+    /// (Simulator can read Mac paths), or a bare filename inside this directory -- where real
+    /// logs pulled off the phone already live.
+    static func resolveReplayPath(_ raw: String) -> URL {
+        raw.hasPrefix("/") ? URL(fileURLWithPath: raw) : directory.appendingPathComponent(raw)
+    }
+
     /// Filename `tlog-<start_unix>-<first 8 of id>.json`; sortedKeys makes the output
     /// deterministic (matters for the byte-level snake_case check in triplog-smoke).
     @discardableResult

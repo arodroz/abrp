@@ -328,6 +328,51 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
                 }
             }
         }
+
+        // Trip Log replay harness (wayfinder #87): `-replayTripLog <path>` (the same value
+        // PlanStore.load() used to plan the origin/destination -- re-read/re-decoded here rather
+        // than plumbed through, same "each seam owns its own launch-argument read" pattern as
+        // `-simulatedLocationFix` vs. `-simulatedDriveDistancesM`) feeds every sample into
+        // `ingest`, in order, with REAL relative timing (each sample's `t` delta divided by
+        // `-replaySpeed`, default 10x) instead of the fixed cadence above -- proving the Follow
+        // Camera against a real recorded drive rather than synthetic along-route fixes. Course is
+        // the bearing from the previous sample (-1, invalid, for the first sample or a repeated
+        // coordinate) via RouteSnap's shared bearing helper.
+        if let raw = UserDefaults.standard.string(forKey: "replayTripLog") {
+            let url = TripLogStorage.resolveReplayPath(raw)
+            if let data = try? Data(contentsOf: url), let log = try? JSONDecoder().decode(TripLog.self, from: data) {
+                let samples = log.samples
+                let replaySpeed = UserDefaults.standard.string(forKey: "replaySpeed").flatMap(Double.init) ?? 10
+                let session = driveSession
+                Task {
+                    print("Trip Log replay: starting, \(samples.count) samples at \(replaySpeed)x")
+                    for (index, sample) in samples.enumerated() {
+                        guard phase == .driving, driveSession == session else { return }
+                        let coordinate = CLLocationCoordinate2D(latitude: sample.lat, longitude: sample.lon)
+                        var course = -1.0
+                        if index > 0 {
+                            let previous = samples[index - 1]
+                            if previous.lat != sample.lat || previous.lon != sample.lon {
+                                course = RouteSnap.bearingDeg(
+                                    from: CLLocationCoordinate2D(latitude: previous.lat, longitude: previous.lon),
+                                    to: coordinate
+                                )
+                            }
+                        }
+                        ingest(CLLocation(
+                            coordinate: coordinate, altitude: sample.altM ?? 0,
+                            horizontalAccuracy: sample.haccM ?? -1, verticalAccuracy: sample.altM != nil ? 5 : -1,
+                            course: course, speed: sample.speedMps ?? -1, timestamp: Date()
+                        ))
+                        if index + 1 < samples.count {
+                            let intervalS = max(0, samples[index + 1].t - sample.t) / replaySpeed
+                            try? await Task.sleep(nanoseconds: UInt64(intervalS * 1_000_000_000))
+                        }
+                    }
+                    print("Trip Log replay: done, \(samples.count) samples fed")
+                }
+            }
+        }
     }
 
     /// HUD/geometry snapshot shared by `go()` (full entry) and the off-route replan swap
