@@ -26,11 +26,12 @@ const QUALIFYING_DISTANCE_M: f64 = 100_000.0;
 const ACCEPTANCE_MAX_ERROR_POINTS: f64 = 3.0;
 const ACCEPTANCE_MAE_POINTS: f64 = 2.0;
 
-/// One 1 Hz Trip Log fix (ADR 0009 point 1). `speed_mps` is unused by
-/// today's replay -- segment speed comes from consecutive fixes' distance/dt
-/// -- but is kept here for the 3-scalar least-squares escalation path ADR
-/// 0009 point 3 defers to (it needs an independently observed speed to
-/// separate aero from rolling terms).
+/// One 1 Hz Trip Log fix (ADR 0009 point 1). `speed_mps`, when present,
+/// drives `delta_v_kmh` in `replay_trace_wh` (issue #85: GPS position
+/// jitter must not be read as phantom acceleration); it is otherwise kept
+/// here for the 3-scalar least-squares escalation path ADR 0009 point 3
+/// still defers to (it needs an independently observed speed to separate
+/// aero from rolling terms).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TraceSample {
     pub t_s: f64,
@@ -61,10 +62,15 @@ fn haversine_m(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
 ///
 /// - Pairs with `dt <= 0` are skipped defensively (a duplicate or
 ///   out-of-order fix), and don't advance `delta_v_kmh`'s "previous speed".
-/// - `delta_v_kmh` is this segment's speed minus the previous segment's
-///   speed, previous starting at 0.0 (a trip starts at rest, so the first
-///   moving segment pays its kinetic ramp-up, same as `optimiser::eval_leg`
-///   does for a road-graph Leg).
+/// - `delta_v_kmh` (issue #85): when both fixes carry `speed_mps`, it is
+///   `(to.speed_mps - from.speed_mps) * 3.6` -- an independently observed
+///   speed rather than one derived from this segment's own (jitter-prone)
+///   distance/dt, so GPS position noise no longer reads as phantom
+///   acceleration into the kinetic term's asymmetric eta_drive/eta_regen
+///   split. Otherwise it falls back to this segment's speed minus the
+///   previous segment's speed, previous starting at 0.0 (a trip starts at
+///   rest, so the first moving segment pays its kinetic ramp-up, same as
+///   `optimiser::eval_leg` does for a road-graph Leg).
 /// - `road_class` is always 0 (highway/default, no urban surcharge): the
 ///   surcharge exists because the planner's constant-speed model can't see
 ///   stop-start, but this 1 Hz replay sees stop-start directly as kinetic
@@ -100,7 +106,10 @@ pub fn replay_trace_wh(
 
         let seg_distance_m = haversine_m(from.lat, from.lon, to.lat, to.lon);
         let speed_kmh = seg_distance_m / dt_s * 3.6;
-        let delta_v_kmh = speed_kmh - prev_speed_kmh;
+        let delta_v_kmh = match (from.speed_mps, to.speed_mps) {
+            (Some(from_mps), Some(to_mps)) => (to_mps - from_mps) * 3.6,
+            _ => speed_kmh - prev_speed_kmh,
+        };
         let (ascent_m, descent_m) = altitude.step(to.alt_m);
 
         let cond = Conditions {
@@ -290,6 +299,51 @@ mod tests {
             .collect()
     }
 
+    /// Deterministic LCG step (issue #85 tests): no `rand` dependency, just
+    /// enough pseudo-randomness to jitter positions reproducibly.
+    fn lcg_next(state: &mut u64) -> u64 {
+        *state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        *state
+    }
+
+    /// Applies pseudo-random +-5 m jitter to each sample's lat/lon (issue
+    /// #85: simulating GPS position noise), leaving `t_s`, `speed_mps` and
+    /// `alt_m` untouched. Two components, both from the same deterministic
+    /// LCG: a tiny every-sample wobble (so consecutive samples are never
+    /// at the exact same point -- `replay_trace_wh` charges aux time via
+    /// `t_s = distance/speed`, which only recovers `dt` when that segment's
+    /// speed is nonzero) plus a `hold`-period burst that jumps to a fresh
+    /// +-5 m offset and holds it, modelling an occasional multipath outlier
+    /// rather than full-scale noise every single fix.
+    fn jitter_positions(samples: &[TraceSample], seed: u64, hold: usize) -> Vec<TraceSample> {
+        let deg_per_m = 1.0 / 111_320.0;
+        let mut state = seed;
+        let (mut burst_lat_m, mut burst_lon_m) = (0.0, 0.0);
+        samples
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                if i % hold == 0 {
+                    burst_lat_m =
+                        (lcg_next(&mut state) >> 40) as f64 / (1u64 << 24) as f64 * 10.0 - 5.0;
+                    burst_lon_m =
+                        (lcg_next(&mut state) >> 40) as f64 / (1u64 << 24) as f64 * 10.0 - 5.0;
+                }
+                let wobble_lat_m =
+                    (lcg_next(&mut state) >> 40) as f64 / (1u64 << 24) as f64 * 0.04 - 0.02;
+                let wobble_lon_m =
+                    (lcg_next(&mut state) >> 40) as f64 / (1u64 << 24) as f64 * 0.04 - 0.02;
+                TraceSample {
+                    lat: s.lat + (burst_lat_m + wobble_lat_m) * deg_per_m,
+                    lon: s.lon + (burst_lon_m + wobble_lon_m) * deg_per_m,
+                    ..*s
+                }
+            })
+            .collect()
+    }
+
     // ---- weighted_median ----
 
     #[test]
@@ -395,9 +449,11 @@ mod tests {
     // ---- replay_trace_wh ----
 
     /// A constant-speed flat evenly-spaced trace should replay to
-    /// approximately one big edge at that speed with `delta_v` 0, save for
-    /// the first segment's kinetic ramp-up from rest (which the closed-form
-    /// single-edge call doesn't pay).
+    /// approximately one big edge at that speed with `delta_v` 0 throughout:
+    /// `flat_trip` reports `speed_mps` from the very first sample (issue
+    /// #85: real GPS speed, not distance/dt, now drives `delta_v_kmh` when
+    /// available), so there is no "starts at rest" ramp-up to pay -- the
+    /// trace says the vehicle was already at cruising speed at t=0.
     #[test]
     fn replay_matches_closed_form_single_edge_within_ramp_tolerance() {
         let vehicle = VehicleModel::ioniq5_lr_2wd();
@@ -427,11 +483,115 @@ mod tests {
             },
         );
 
-        // Add the first segment's kinetic ramp-up analytically (ticket:
-        // "or add the ramp analytically and tighten"), isolated as the
-        // marginal energy of that one segment paying delta_v == its own
-        // speed instead of the 0 the closed-form `one_edge` above assumes
-        // throughout.
+        let err_pct = (replay.predicted_wh - one_edge).abs() / one_edge * 100.0;
+        assert!(
+            err_pct <= 0.5,
+            "replay {} vs one-edge {} (err {err_pct}%)",
+            replay.predicted_wh,
+            one_edge
+        );
+    }
+
+    /// GPS jitter on a parked car must not be read as speed (issue #85):
+    /// with `speed_mps` reporting true rest, the kinetic term should stay
+    /// at zero and the only cost is aux draw over elapsed time.
+    #[test]
+    fn replay_stationary_jitter_costs_only_aux() {
+        let vehicle = VehicleModel::ioniq5_lr_2wd();
+        let calib = Calibration::default();
+        let dt_s = 1.0;
+        let n = 601; // 600 one-second segments
+        let stationary: Vec<TraceSample> = (0..n)
+            .map(|i| TraceSample {
+                t_s: i as f64 * dt_s,
+                lat: 0.0,
+                lon: 0.0,
+                speed_mps: Some(0.0),
+                alt_m: None,
+            })
+            .collect();
+        let samples = jitter_positions(&stationary, 1, 20);
+        let replay = replay_trace_wh(&vehicle, &calib, Some(23.0), &samples);
+
+        let total_seconds = (n - 1) as f64 * dt_s;
+        // Full aux draw, not just p_aux_w: at 23 degC (flat HVAC baseline,
+        // 18-24 degC per `p_hvac_w`'s knots) the HVAC term is a fixed
+        // additional load, same as p_aux_w's -- both are "aux draw over
+        // elapsed time", distinct from the mechanical terms this test is
+        // isolating.
+        let expected_aux_wh =
+            (vehicle.p_aux_w + calib.k_hvac * crate::p_hvac_w(23.0)) * total_seconds / 3600.0;
+        let err_pct = (replay.predicted_wh - expected_aux_wh).abs() / expected_aux_wh * 100.0;
+        assert!(
+            err_pct <= 15.0,
+            "predicted {} vs aux-only {} (err {err_pct}%)",
+            replay.predicted_wh,
+            expected_aux_wh
+        );
+    }
+
+    /// With `speed_mps` available, position jitter (phantom distance/speed
+    /// noise) must not leak into the kinetic term (issue #85): a jittered
+    /// constant-speed trip should cost close to the same as the clean one.
+    #[test]
+    fn replay_with_gps_speed_ignores_position_jitter() {
+        let vehicle = VehicleModel::ioniq5_lr_2wd();
+        let calib = Calibration::default();
+        let speed_kmh = 100.0;
+        let dt_s = 1.0;
+        let n = 601; // 600 one-second segments
+        let clean = flat_trip(n, speed_kmh, dt_s);
+        let jittered = jitter_positions(&clean, 42, 20);
+
+        let clean_replay = replay_trace_wh(&vehicle, &calib, Some(23.0), &clean);
+        let jittered_replay = replay_trace_wh(&vehicle, &calib, Some(23.0), &jittered);
+
+        let err_pct = (jittered_replay.predicted_wh - clean_replay.predicted_wh).abs()
+            / clean_replay.predicted_wh
+            * 100.0;
+        assert!(
+            err_pct <= 3.0,
+            "jittered {} vs clean {} (err {err_pct}%)",
+            jittered_replay.predicted_wh,
+            clean_replay.predicted_wh
+        );
+    }
+
+    /// Without `speed_mps`, the fallback to distance/dt speed (and its
+    /// delta_v) must be untouched by the issue #85 fix -- same closed-form
+    /// comparison as `replay_matches_closed_form_single_edge_within_ramp_tolerance`.
+    #[test]
+    fn replay_without_gps_speed_falls_back_to_distance_speed() {
+        let vehicle = VehicleModel::ioniq5_lr_2wd();
+        let calib = Calibration::default();
+        let speed_kmh = 100.0;
+        let dt_s = 1.0;
+        let n = 601; // 600 one-second segments
+        let mut samples = flat_trip(n, speed_kmh, dt_s);
+        for s in &mut samples {
+            s.speed_mps = None;
+        }
+        let replay = replay_trace_wh(&vehicle, &calib, Some(15.0), &samples);
+
+        let cond = Conditions {
+            temp_c: 15.0,
+            headwind_ms: 0.0,
+            altitude_m: 0.0,
+        };
+        let one_edge = edge_energy_wh(
+            &vehicle,
+            &calib,
+            &cond,
+            &EdgeInput {
+                distance_m: replay.distance_m,
+                speed_kmh,
+                delta_v_kmh: 0.0,
+                ascent_m: 0.0,
+                descent_m: 0.0,
+                road_class: 0,
+            },
+        );
+
         let first_seg_distance_m = haversine_m(
             samples[0].lat,
             samples[0].lon,
