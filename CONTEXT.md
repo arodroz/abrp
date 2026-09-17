@@ -108,6 +108,10 @@ _Avoid_: Navigation mode, turn-by-turn, guidance mode
 The action that enters Drive Mode with the current Plan, available only when the Plan's origin is the current location; entering it also opens the drive's Trip Log.
 _Avoid_: Start navigation, start route, depart
 
+**Follow Camera**:
+The Drive Mode camera while it tracks the vehicle: heading-up, pitched, the vehicle framed low so the road ahead fills the screen. Distinct from free-look (a gesture broke the follow) and overview (flat, north-up, whole remaining route).
+_Avoid_: Nav camera, 3D camera, tracking mode, follow mode
+
 **Telemetry Profile**:
 The data file describing how to read one vehicle's live telemetry over OBD: which ECUs answer, which identifiers to poll, how response bytes decode into signals, the pack-variant constants, and the mapping of its native signals onto Canonical Signals. Data, not code — the polling and decoding engine is generic. Distinct from the Vehicle Model, which holds energy parameters; a supported car has both. Each profile carries a validation tier: car-validated (checked against a real car), vector-validated (passes recorded test vectors in the replay harness), or paper (defined, untested).
 _Avoid_: PID list, decoder config, car module
