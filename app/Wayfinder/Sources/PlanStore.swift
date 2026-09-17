@@ -626,7 +626,33 @@ final class PlanStore: NSObject, @preconcurrency MLNMapViewDelegate, @preconcurr
         if let plan {
             RouteLayer.addLayers(to: style, plan: plan, origin: originCoordinate, destination: destination?.coordinate)
         }
+        // THROWAWAY PROTOTYPE (wayfinder #90, `-proto3d 1`): the layer and `style.light` live on
+        // the style, so the light/dark swap's full reload drops both -- re-installed here, after
+        // the route layers so the extrusion can be inserted below the route ribbon.
+        ProtoExtrusions.install(style: style, mapView: mapView, isDark: isDarkAppearance)
+        ProtoExtrusions.setVisible(protoExtrusionsVisible, style: style)
         setInitialCameraIfNeeded()
+    }
+
+    // MARK: 3D Drive Mode prototype (wayfinder #90) -- gated, throwaway; see Proto3D.swift
+
+    /// Whether the extruded-buildings layer is currently shown; also what the fps readout reports.
+    private(set) var protoExtrusionsVisible = false
+    private let protoFps = ProtoFpsMeter()
+
+    /// DriveStore calls this on every phase/camera-mode transition.
+    func setDriveExtrusions(visible: Bool) {
+        guard ProtoFlags.extrusionsOn else { return }
+        protoExtrusionsVisible = visible
+        guard let style = mapView.style else { return }
+        ProtoExtrusions.setVisible(visible, style: style)
+    }
+
+    func mapViewDidFinishRenderingFrame(
+        _ mapView: MLNMapView, fullyRendered: Bool, renderingStats: MLNRenderingStats
+    ) {
+        guard ProtoFlags.fpsOn else { return }
+        protoFps.recordFrame(mapView: mapView, extrusionsVisible: protoExtrusionsVisible)
     }
 
     /// On plain launch there's no destination yet, so no route to fit the camera to --

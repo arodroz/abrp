@@ -54,3 +54,53 @@ Caveats:
 - **The replayed trace was a real, complex drive, not the straight route the planner computes between its first/last sample** — expect off-route replans (ADR 0012 point 6) during a long replay, same as any real drive that deviates from its plan.
 - **No Trip Log is recorded for a replayed drive**: `TripLogStore` reads `-replayTripLog` at init and skips its save on End/arrival, so replays never pollute `Documents/trip-logs/` with synthetic calibration data.
 - There is no UI-injection path for tapping Go on the Simulator (see above); `--autotest replay-demo` supplies it for automated/console verification — it plans and drives exactly like a real replay, only substituting the Go tap.
+
+## 3D Drive Mode prototype (wayfinder #90)
+
+**Throwaway.** Everything lives in `app/Wayfinder/Sources/Proto3D.swift` plus small gated hooks in `PlanStore.swift` and `DriveStore.swift`; with no `-proto*` argument the app behaves exactly as it did before. Three independent gates:
+
+| Argument | Default | What it does |
+|---|---|---|
+| `-proto3d 1` | off | `MLNFillExtrusionStyleLayer` on `protomaps`/`buildings` (`kind IN {building, building_part}`), inserted below the route ribbon, plus an `MLNLight` (viewport anchor, position 1.15/210/40, intensity 0.35) and `tileLodPitchThreshold`. Visible only while `phase == .driving` and the camera is following/free-look; the flat `buildings` fill is hidden while it is |
+| `-protoOpacity <0-1>` | `0.75` | `fillExtrusionOpacity` (1.0 drops MapLibre's depth pre-pass — the first knob to try if fps misses) |
+| `-protoMinzoom <z>` | `15` | layer `minimumZoomLevel`; height/base fade in from `z` to `z + 0.5` |
+| `-protoCamera 1` | off | the re-tuned Follow Camera (pitch, `contentInset` framing, look-ahead zoom, per-fix animation) instead of the shipped `altitude: 800, pitch: 45` over 0.8 s |
+| `-protoPitch <deg>` | `60` | Follow Camera pitch |
+| `-protoZoomMin <z>` / `-protoZoomMax <z>` | `14.5` / `17` | look-ahead 1500 m maps to `protoZoomMin`, 200 m to `protoZoomMax`, linear between; zoom moves at most 0.1 levels/s and freezes below 7 km/h |
+| `-protoLookAheadS <s>` | `32` | look-ahead seconds: `lookAhead = clamp(speed × s, 200 m, 1500 m)`, pulled in to `dTurn + 100 m` when a manoeuvre is upcoming |
+| `-protoFps 1` | off | counts `mapViewDidFinishRenderingFrame` and logs one `os_log` line every 5 s at **default** level, subsystem `org.anteras.wayfinder`, category `proto.fps`: average fps, min frame interval, zoom, pitch, extrusions on/off |
+| `-protoLod <deg>` | `30` | `tileLodPitchThreshold`, in degrees (pass `60` to disable variable tile LOD again) — diagnostic knob |
+| `-protoInset <0/1>` | `1` | `0` drops the `contentInset` framing and centres the vehicle like the shipped camera — diagnostic knob |
+
+### Simulator
+
+Combines the replay harness above with the three gates (pack-bearing iPhone 17 Pro `C95993C6-C86A-4FC8-A7CE-82FB03C0B62C`):
+
+```
+xcrun simctl privacy C95993C6-C86A-4FC8-A7CE-82FB03C0B62C grant location org.anteras.wayfinder
+xcrun simctl launch --console-pty C95993C6-C86A-4FC8-A7CE-82FB03C0B62C org.anteras.wayfinder \
+  --autotest replay-demo -activeRegion corridor \
+  -replayTripLog "$(pwd)/.trip-logs/<log>.json" -replaySpeed 20 \
+  -proto3d 1 -protoCamera 1 -protoFps 1
+```
+
+`--console-pty` shows only `print()` output. The fps lines are `os_log`, so stream them separately:
+
+```
+xcrun simctl spawn C95993C6-C86A-4FC8-A7CE-82FB03C0B62C log stream \
+  --predicate 'subsystem == "org.anteras.wayfinder" AND category == "proto.fps"' --style compact
+```
+
+**Pick a log whose track has basemap tiles, not just a routable position.** The `corridor` pack's PMTiles bbox is 2.51/49.44 → 7.09/53.51 and its actual coverage is a corridor inside that box: every Trip Log in `.trip-logs/` was recorded around Longwy (49.48/5.75), where the pack has **no** z14 tiles at all, so a replay of one renders a blank basemap (with or without the prototype — check against a no-flag run before blaming the gates). Luxembourg City, Arlon and anything on the LU→NL corridor do have tiles.
+
+### Phone
+
+Arguments go after the bundle identifier, but `devicectl`'s own parser reads a leading `-p…` as a bundle of short flags (`-t` is its `--timeout`), so separate them with `--`:
+
+```
+xcrun devicectl device process launch --console --terminate-existing \
+  --device ED47BA12-C341-5363-AEFE-C20015477C96 org.anteras.wayfinder \
+  -- -replayTripLog <log>.json -replaySpeed 20 -proto3d 1 -protoCamera 1 -protoFps 1
+```
+
+On the phone `-replayTripLog` takes a bare filename inside `Documents/trip-logs/`. `--console` streams os_log at default level, so the `proto.fps` lines arrive in that same output — which is why they are logged at default level and not `.debug`. The phone is the only place the fps numbers mean anything; the Simulator renders on the Mac's GPU and sits at ~60 fps regardless.

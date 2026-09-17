@@ -294,6 +294,9 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
         cameraMode = .following
         planStore.mapView.showsUserLocation = false
         addPuckIfNeeded()
+        protoSyncDriveVisuals() // wayfinder #90 (gated)
+        protoZoom = nil
+        protoLastFixAt = nil
 
         // Best-effort: the Go gate already implies location worked once (that's how the origin
         // got adopted), so there's no error surface here in v1.
@@ -428,6 +431,7 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
         driveCardExpanded = false
         banner = nil
         phase = .idle
+        protoSyncDriveVisuals() // wayfinder #90 (gated)
         if tripStore.phase == .recording { tripStore.stopTapped() }
         // 12V-safety gate (wayfinder #79): closed the moment the drive ends -- but AFTER capture
         // closes, because closing the gate wipes `latestReadings` and the end-of-trip telemetry
@@ -480,6 +484,7 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
         // End is.
         if distanceAlongRouteM >= (drivePlan?.totalDistM ?? 0) - 40 {
             phase = .arrived
+            protoSyncDriveVisuals() // wayfinder #90 (gated)
             hud = computeHud(distanceAlongM: distanceAlongRouteM)
             banner = nil
             lastHudFixTimestamp = location.timestamp
@@ -532,6 +537,7 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
         if let puckAnnotation, let snappedCoordinate {
             puckAnnotation.coordinate = snappedCoordinate
         }
+        protoNoteFix(location) // wayfinder #90 (gated)
         if cameraMode == .following {
             applyFollowingCamera()
         }
@@ -756,11 +762,13 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
     func noteUserGesture() {
         guard phase == .driving, cameraMode != .freeLook else { return }
         cameraMode = .freeLook
+        protoSyncDriveVisuals() // wayfinder #90 (gated)
     }
 
     func recenter() {
         guard phase == .driving else { return }
         cameraMode = .following
+        protoSyncDriveVisuals() // wayfinder #90 (gated)
         applyFollowingCamera()
     }
 
@@ -774,6 +782,7 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
             return
         }
         cameraMode = .overview
+        protoSyncDriveVisuals() // wayfinder #90 (gated)
 
         let remaining = lastSegmentIndex.map { Array(routePolyline[$0...]) } ?? routePolyline
         guard remaining.count >= 2 else { return }
@@ -801,10 +810,79 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
     /// only trips on real gesture reasons, so this can't cancel itself back out of following.
     private func applyFollowingCamera() {
         guard let snappedCoordinate else { return }
+        if ProtoFlags.cameraOn {
+            applyProtoFollowingCamera(center: snappedCoordinate)
+            return
+        }
         let camera = MLNMapCamera(
             lookingAtCenter: snappedCoordinate, altitude: 800, pitch: 45, heading: smoothedCourseDeg
         )
         planStore.mapView.setCamera(camera, withDuration: 0.8, animationTimingFunction: CAMediaTimingFunction(name: .linear))
+    }
+
+    // MARK: 3D Drive Mode prototype (wayfinder #90) -- gated, throwaway; see Proto3D.swift
+
+    /// The commanded zoom the rate limiter walks toward the target (nil until the first fix).
+    private var protoZoom: Double?
+    /// Wall clock of the previous fix: drives both the animation duration and the 0.1 zoom/s
+    /// limiter. Wall clock, not fix timestamp, because a scaled Trip Log replay compresses fix
+    /// timestamps while the camera still animates in real time.
+    private var protoLastFixAt: Date?
+    private var protoSpeedMps: Double = 0
+    private var protoFixDeltaS: Double = 1
+
+    /// Called from `ingest` before the camera is applied. Cheap, but still gated so an ungated
+    /// run takes exactly the code path it always did.
+    private func protoNoteFix(_ location: CLLocation) {
+        guard ProtoFlags.cameraOn else { return }
+        let now = Date()
+        protoFixDeltaS = protoLastFixAt.map { now.timeIntervalSince($0) } ?? 1
+        protoLastFixAt = now
+        protoSpeedMps = max(0, location.speed)
+    }
+
+    /// Pitch from `-protoPitch`, framing from a persistent `contentInset`, altitude from a
+    /// look-ahead distance mapped to zoom and rate-limited. See Proto3D.swift for the arithmetic
+    /// and docs/research/follow-camera-behaviour.md §8 for where the numbers come from.
+    private func applyProtoFollowingCamera(center: CLLocationCoordinate2D) {
+        let mapView = planStore.mapView
+        let pitch = ProtoFlags.pitch
+
+        if ProtoFlags.insetOn {
+            mapView.automaticallyAdjustsContentInset = false
+            mapView.contentInset = ProtoCamera.contentInset(
+                viewHeight: mapView.bounds.height, bannerShown: banner != nil)
+        }
+
+        var dTurnM: Double?
+        if let idx = StepTracker.upcomingIndex(steps: guidanceSteps, distanceAlongRouteM: distanceAlongRouteM) {
+            dTurnM = max(0, guidanceSteps[idx].distAlongRouteM - distanceAlongRouteM)
+        }
+        let lookAheadM = ProtoCamera.lookAheadM(speedMps: protoSpeedMps, dTurnM: dTurnM)
+        let target = ProtoCamera.zoom(forLookAheadM: lookAheadM)
+        let zoom = ProtoCamera.rateLimited(
+            current: protoZoom, target: target, dtS: protoFixDeltaS, speedMps: protoSpeedMps)
+        protoZoom = zoom
+
+        let altitude = MLNAltitudeForZoomLevel(zoom, pitch, center.latitude, mapView.frame.size)
+        let camera = MLNMapCamera(
+            lookingAtCenter: center, altitude: altitude, pitch: pitch, heading: smoothedCourseDeg
+        )
+        mapView.setCamera(
+            camera, withDuration: min(protoFixDeltaS, 1.0),
+            animationTimingFunction: CAMediaTimingFunction(name: .linear))
+    }
+
+    /// One hook for every phase/camera-mode transition: extrusions are visible only while
+    /// driving in following/free-look, and the prototype's `contentInset` is reset whenever the
+    /// Follow Camera isn't framing (overview, End, arrival).
+    private func protoSyncDriveVisuals() {
+        planStore.setDriveExtrusions(
+            visible: phase == .driving && (cameraMode == .following || cameraMode == .freeLook))
+        guard ProtoFlags.cameraOn else { return }
+        if phase != .driving || cameraMode == .overview {
+            planStore.mapView.contentInset = .zero
+        }
     }
 
     // MARK: Puck
