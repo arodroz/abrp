@@ -62,6 +62,9 @@
 // camera), a 0.1 zoom/s limiter frozen below 7 km/h, and the vehicle framed low in the view via a
 // persistent `mapView.contentInset` sized from `hudHeightPt`/`bannerHeightPt` (measured by
 // RootView). The inset is reset on End, arrival and overview; free-look keeps it.
+//
+// Extruded buildings (wayfinder #91): `syncDriveExtrusions` shows DriveExtrusions' layer only
+// while driving in following/free-look, and runs at every phase/camera-mode transition.
 import CoreLocation
 import Foundation
 import MapLibre
@@ -316,6 +319,7 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
 
         phase = .driving
         cameraMode = .following
+        syncDriveExtrusions()
         planStore.mapView.showsUserLocation = false
         addPuckIfNeeded()
 
@@ -459,6 +463,7 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
         driveCardExpanded = false
         banner = nil
         phase = .idle
+        syncDriveExtrusions()
         if tripStore.phase == .recording { tripStore.stopTapped() }
         // 12V-safety gate (wayfinder #79): closed the moment the drive ends -- but AFTER capture
         // closes, because closing the gate wipes `latestReadings` and the end-of-trip telemetry
@@ -511,6 +516,7 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
         // End is.
         if distanceAlongRouteM >= (drivePlan?.totalDistM ?? 0) - 40 {
             phase = .arrived
+            syncDriveExtrusions()
             planStore.mapView.contentInset = .zero // wayfinder #92
             hud = computeHud(distanceAlongM: distanceAlongRouteM)
             banner = nil
@@ -788,6 +794,12 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
 
     // MARK: Camera
 
+    /// Extruded buildings are visible only while driving in following/free-look (wayfinder #91).
+    private func syncDriveExtrusions() {
+        planStore.setDriveExtrusions(
+            visible: phase == .driving && (cameraMode == .following || cameraMode == .freeLook))
+    }
+
     /// Free-look on ANY map gesture (ADR 0012 point 3), from either following or overview --
     /// wired to PlanStore.onUserMapGesture, which only fires for real gesture reasons, never
     /// `.programmatic` (see PlanStore's MLNCameraChangeReason check), so this following camera's
@@ -795,11 +807,13 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
     func noteUserGesture() {
         guard phase == .driving, cameraMode != .freeLook else { return }
         cameraMode = .freeLook
+        syncDriveExtrusions()
     }
 
     func recenter() {
         guard phase == .driving else { return }
         cameraMode = .following
+        syncDriveExtrusions()
         applyFollowingCamera()
     }
 
@@ -813,6 +827,7 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
             return
         }
         cameraMode = .overview
+        syncDriveExtrusions()
         // wayfinder #92: drop the Follow Camera's inset BEFORE fitting, or the fit is skewed.
         planStore.mapView.contentInset = .zero
 

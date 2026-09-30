@@ -626,7 +626,21 @@ final class PlanStore: NSObject, @preconcurrency MLNMapViewDelegate, @preconcurr
         if let plan {
             RouteLayer.addLayers(to: style, plan: plan, origin: originCoordinate, destination: destination?.coordinate)
         }
+        // wayfinder #91: the layer and `style.light` live on the style, so the light/dark swap's
+        // full reload drops both -- re-installed after the route layers so it lands below them.
+        DriveExtrusions.install(style: style, mapView: mapView, isDark: isDarkAppearance)
+        DriveExtrusions.setVisible(driveExtrusionsVisible, style: style)
         setInitialCameraIfNeeded()
+    }
+
+    /// Whether Drive Mode currently wants the extruded-buildings layer shown (wayfinder #91).
+    private(set) var driveExtrusionsVisible = false
+
+    /// DriveStore calls this on every phase/camera-mode transition.
+    func setDriveExtrusions(visible: Bool) {
+        driveExtrusionsVisible = visible
+        guard let style = mapView.style else { return }
+        DriveExtrusions.setVisible(visible, style: style)
     }
 
     /// On plain launch there's no destination yet, so no route to fit the camera to --
