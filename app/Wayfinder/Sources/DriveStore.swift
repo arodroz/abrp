@@ -65,6 +65,10 @@
 //
 // Extruded buildings (wayfinder #91): `syncDriveExtrusions` shows DriveExtrusions' layer only
 // while driving in following/free-look, and runs at every phase/camera-mode transition.
+//
+// 120 fps (wayfinder #95, ADR 0002): `enterDrive` starts DriveFrameRate (MapLibre at 120 plus a
+// no-op 120 Hz display link); `end()` and destination arrival stop it. Overview and free-look
+// keep 120 -- the rule is "while driving".
 import CoreLocation
 import Foundation
 import MapLibre
@@ -320,6 +324,7 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
         phase = .driving
         cameraMode = .following
         syncDriveExtrusions()
+        DriveFrameRate.start(mapView: planStore.mapView) // wayfinder #95
         planStore.mapView.showsUserLocation = false
         addPuckIfNeeded()
 
@@ -464,6 +469,7 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
         banner = nil
         phase = .idle
         syncDriveExtrusions()
+        DriveFrameRate.stop(mapView: planStore.mapView) // wayfinder #95
         if tripStore.phase == .recording { tripStore.stopTapped() }
         // 12V-safety gate (wayfinder #79): closed the moment the drive ends -- but AFTER capture
         // closes, because closing the gate wipes `latestReadings` and the end-of-trip telemetry
@@ -517,6 +523,7 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
         if distanceAlongRouteM >= (drivePlan?.totalDistM ?? 0) - 40 {
             phase = .arrived
             syncDriveExtrusions()
+            DriveFrameRate.stop(mapView: planStore.mapView) // wayfinder #95
             planStore.mapView.contentInset = .zero // wayfinder #92
             hud = computeHud(distanceAlongM: distanceAlongRouteM)
             banner = nil

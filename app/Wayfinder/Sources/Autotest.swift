@@ -1669,6 +1669,12 @@ enum Autotest {
         report("extrusion-planning", planningExtOk, "extrusion=\(planningExt.extrusionVisible) flat=\(planningExt.flatVisible)")
         ok = ok && planningExtOk
 
+        // wayfinder #95: 120 fps only while driving.
+        let planningFps = store.mapView.preferredFramesPerSecond
+        let planningFpsOk = planningFps == .default
+        report("fps-planning", planningFpsOk, "preferredFramesPerSecond=\(planningFps.rawValue)")
+        ok = ok && planningFpsOk
+
         // Step 5 (wayfinder #62): Go now opens the start-SoC prompt instead of entering
         // directly.
         driveStore.go()
@@ -1707,6 +1713,11 @@ enum Autotest {
         let driveExtOk = driveExtExists && driveExt.extrusionVisible && !driveExt.flatVisible
         report("extrusion-drive", driveExtOk, "exists=\(driveExtExists) extrusion=\(driveExt.extrusionVisible) flat=\(driveExt.flatVisible)")
         ok = ok && driveExtOk
+
+        let driveFps = store.mapView.preferredFramesPerSecond
+        let driveFpsOk = driveFps.rawValue == 120
+        report("fps-drive", driveFpsOk, "preferredFramesPerSecond=\(driveFps.rawValue)")
+        ok = ok && driveFpsOk
 
         guard let polyline = store.displayedPlan?.polyline, polyline.count >= 3 else {
             report("snap-on-route", false, "polyline too short for this smoke")
@@ -1879,6 +1890,11 @@ enum Autotest {
         let endExtOk = !endExt.extrusionVisible && endExt.flatVisible
         report("extrusion-end", endExtOk, "extrusion=\(endExt.extrusionVisible) flat=\(endExt.flatVisible)")
         ok = ok && endExtOk
+
+        let endFps = store.mapView.preferredFramesPerSecond
+        let endFpsOk = endFps == .default
+        report("fps-end", endFpsOk, "preferredFramesPerSecond=\(endFps.rawValue)")
+        ok = ok && endFpsOk
         tripStore.confirmEndSoc(70)
         driveStore.go()
         tripStore.confirmStartSoc(80)
