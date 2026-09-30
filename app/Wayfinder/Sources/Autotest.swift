@@ -1653,6 +1653,22 @@ enum Autotest {
         ok = ok && planLanded && driveStore.canGo
         guard planLanded else { await finish(ok: false) }
 
+        // wayfinder #91: planning map shows the flat buildings, never the extrusion. `flatVisible`
+        // means the flat fill draws at z15+, where the extrusion takes over in Drive Mode (below
+        // z15 the fill stays on in both, see DriveExtrusions.setVisible).
+        func extrusionState() -> (extrusionVisible: Bool, flatVisible: Bool) {
+            let style = store.mapView.style
+            let flat = style?.layer(withIdentifier: "buildings")
+            return (
+                style?.layer(withIdentifier: DriveExtrusions.layerId)?.isVisible == true,
+                flat?.isVisible == true && (flat?.maximumZoomLevel ?? 0) > 15
+            )
+        }
+        let planningExt = extrusionState()
+        let planningExtOk = !planningExt.extrusionVisible && planningExt.flatVisible
+        report("extrusion-planning", planningExtOk, "extrusion=\(planningExt.extrusionVisible) flat=\(planningExt.flatVisible)")
+        ok = ok && planningExtOk
+
         // Step 5 (wayfinder #62): Go now opens the start-SoC prompt instead of entering
         // directly.
         driveStore.go()
@@ -1685,6 +1701,12 @@ enum Autotest {
                 + "showsUserLocation=\(store.mapView.showsUserLocation) tripPhase=\(tripStore.phase)"
         )
         ok = ok && enterOk
+
+        let driveExt = extrusionState()
+        let driveExtExists = store.mapView.style?.layer(withIdentifier: DriveExtrusions.layerId) != nil
+        let driveExtOk = driveExtExists && driveExt.extrusionVisible && !driveExt.flatVisible
+        report("extrusion-drive", driveExtOk, "exists=\(driveExtExists) extrusion=\(driveExt.extrusionVisible) flat=\(driveExt.flatVisible)")
+        ok = ok && driveExtOk
 
         guard let polyline = store.displayedPlan?.polyline, polyline.count >= 3 else {
             report("snap-on-route", false, "polyline too short for this smoke")
@@ -1824,7 +1846,9 @@ enum Autotest {
         let recenterOk = driveStore.cameraMode == .following
         driveStore.toggleOverview()
         let overviewOk = driveStore.cameraMode == .overview
+        let overviewExt = extrusionState()
         driveStore.toggleOverview()
+        let followingExt = extrusionState()
         let backToFollowingOk = driveStore.cameraMode == .following
         let cameraModesOk = freeLookOk && recenterOk && overviewOk && backToFollowingOk
         report(
@@ -1832,6 +1856,14 @@ enum Autotest {
             "freeLook=\(freeLookOk) recenter=\(recenterOk) overview=\(overviewOk) backToFollowing=\(backToFollowingOk)"
         )
         ok = ok && cameraModesOk
+
+        let modesExtOk = !overviewExt.extrusionVisible && overviewExt.flatVisible && followingExt.extrusionVisible
+            && !followingExt.flatVisible
+        report(
+            "extrusion-camera-modes", modesExtOk,
+            "overview=\(overviewExt) following=\(followingExt)"
+        )
+        ok = ok && modesExtOk
 
         // Step 11 (wayfinder #60): steps 6-10 above fed synthetic fixes all over the route
         // (small/far offsets, a fixed course-test coordinate) to exercise snap/course math, so
@@ -1843,6 +1875,10 @@ enum Autotest {
         // (wayfinder #62: end() now flips tripStore to .promptingEndSoc, and go() re-opens the
         // start-SoC prompt -- both resolved inline here to keep this re-entry a single step.)
         driveStore.end()
+        let endExt = extrusionState()
+        let endExtOk = !endExt.extrusionVisible && endExt.flatVisible
+        report("extrusion-end", endExtOk, "extrusion=\(endExt.extrusionVisible) flat=\(endExt.flatVisible)")
+        ok = ok && endExtOk
         tripStore.confirmEndSoc(70)
         driveStore.go()
         tripStore.confirmStartSoc(80)
