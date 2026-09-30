@@ -55,6 +55,13 @@
 // as `voiceEventLog`. Everything else the chart needs (callouts, margin coloring, interpolation)
 // is pure and lives in SoCChartModel.swift instead, so this file's own state stays exactly what
 // it was: the trail is its one addition.
+//
+// Follow Camera (wayfinder #92, ADR 0012 decision 3 amendment): `applyFollowingCamera` now runs
+// the FollowCamera.swift arithmetic -- fixed 60 deg pitch, look-ahead zoom from speed (pulled in
+// by the next manoeuvre, read from StepTracker rather than `banner`, which is computed AFTER the
+// camera), a 0.1 zoom/s limiter frozen below 7 km/h, and the vehicle framed low in the view via a
+// persistent `mapView.contentInset` sized from `hudHeightPt`/`bannerHeightPt` (measured by
+// RootView). The inset is reset on End, arrival and overview; free-look keeps it.
 import CoreLocation
 import Foundation
 import MapLibre
@@ -184,6 +191,21 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
     /// The current Plan's banner-eligible steps (wayfinder #67), rebuilt on every `snapshotPlan`
     /// call -- see that method and `computeBanner`.
     private var guidanceSteps: [StepTracker.GuidanceStep] = []
+
+    /// Measured heights (points) of the drive HUD's bottom block (controls row + DriveCard) and
+    /// the manoeuvre banner, written by RootView and read by the Follow Camera's framing inset
+    /// (wayfinder #92). The banner height is only applied while `banner` is non-nil.
+    /// A change re-frames at once (the DriveCard expanding must not hide the puck until the next
+    /// fix) -- inset only, so the zoom limiter isn't stepped once per layout pass.
+    var hudHeightPt: CGFloat = 0 { didSet { if hudHeightPt != oldValue { refreshFollowInset() } } }
+    var bannerHeightPt: CGFloat = 0 { didSet { if bannerHeightPt != oldValue { refreshFollowInset() } } }
+
+    /// Follow Camera (wayfinder #92): the rate-limited commanded zoom and the wall-clock time of
+    /// the previous fix, both reset per drive in `enterDrive`.
+    private var followZoom: Double?
+    private var lastFixWallClock: Date?
+    private var fixDeltaS: Double = 1
+    private var fixSpeedMps: Double = 0
     /// Voice guidance (wayfinder #68): the AVSpeechSynthesizer wrapper and the tier-scheduling
     /// bookkeeping, reset on every `snapshotPlan` swap -- see that method's comment.
     private let speech = SpeechController()
@@ -288,6 +310,8 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
         snappedCoordinate = nil
         isOnRoute = false
         smoothedCourseDeg = 0
+        followZoom = nil
+        lastFixWallClock = nil
         driveCardExpanded = false
 
         phase = .driving
@@ -425,6 +449,9 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
         if let puckAnnotation { planStore.mapView.removeAnnotation(puckAnnotation) }
         puckAnnotation = nil
         planStore.mapView.showsUserLocation = true
+        // wayfinder #92: hand the viewport back to planning mode.
+        planStore.mapView.contentInset = .zero
+        planStore.mapView.automaticallyAdjustsContentInset = true
         driveCardExpanded = false
         banner = nil
         phase = .idle
@@ -480,6 +507,7 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
         // End is.
         if distanceAlongRouteM >= (drivePlan?.totalDistM ?? 0) - 40 {
             phase = .arrived
+            planStore.mapView.contentInset = .zero // wayfinder #92
             hud = computeHud(distanceAlongM: distanceAlongRouteM)
             banner = nil
             lastHudFixTimestamp = location.timestamp
@@ -532,6 +560,13 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
         if let puckAnnotation, let snappedCoordinate {
             puckAnnotation.coordinate = snappedCoordinate
         }
+        // Follow Camera bookkeeping (wayfinder #92): Δt is WALL-CLOCK time between fixes, not the
+        // fix timestamps -- a scaled Trip Log replay compresses timestamps, and the animation
+        // duration / zoom limiter must track real elapsed time. 1 s when there's no previous fix.
+        let now = Date()
+        fixDeltaS = lastFixWallClock.map { now.timeIntervalSince($0) } ?? 1
+        lastFixWallClock = now
+        fixSpeedMps = max(0, location.speed)
         if cameraMode == .following {
             applyFollowingCamera()
         }
@@ -774,6 +809,8 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
             return
         }
         cameraMode = .overview
+        // wayfinder #92: drop the Follow Camera's inset BEFORE fitting, or the fit is skewed.
+        planStore.mapView.contentInset = .zero
 
         let remaining = lastSegmentIndex.map { Array(routePolyline[$0...]) } ?? routePolyline
         guard remaining.count >= 2 else { return }
@@ -795,16 +832,46 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
         planStore.mapView.setCamera(camera, withDuration: 0.8, animationTimingFunction: CAMediaTimingFunction(name: .linear))
     }
 
-    /// `MLNMapCamera(lookingAtCenter:altitude:pitch:heading:)`, applied with a linear 0.8s
-    /// transition. IMPORTANT: this is a PROGRAMMATIC camera move, which fires PlanStore's
-    /// `shouldChangeFrom:to:reason:` delegate with reason `.programmatic` -- `onUserMapGesture`
-    /// only trips on real gesture reasons, so this can't cancel itself back out of following.
+    /// Follow Camera (wayfinder #92): pitch 60, altitude from the rate-limited look-ahead zoom via
+    /// `MLNAltitudeForZoomLevel`, vehicle framed low by the persistent content inset, heading from
+    /// `smoothedCourseDeg`, animated linearly over the time since the previous fix (max 1 s) so
+    /// consecutive fixes chain without a stop-start. The manoeuvre distance comes from StepTracker
+    /// directly: `banner` is computed after the camera. IMPORTANT: this is a PROGRAMMATIC camera
+    /// move, which fires PlanStore's `shouldChangeFrom:to:reason:` delegate with reason
+    /// `.programmatic` -- `onUserMapGesture` only trips on real gesture reasons, so this can't
+    /// cancel itself back out of following.
     private func applyFollowingCamera() {
         guard let snappedCoordinate else { return }
+        let mapView = planStore.mapView
+        var dTurnM: Double?
+        if let idx = StepTracker.upcomingIndex(steps: guidanceSteps, distanceAlongRouteM: distanceAlongRouteM) {
+            dTurnM = max(0, guidanceSteps[idx].distAlongRouteM - distanceAlongRouteM)
+        }
+        let target = FollowCamera.zoom(forLookAheadM: FollowCamera.lookAheadM(speedMps: fixSpeedMps, dTurnM: dTurnM))
+        let zoom = FollowCamera.rateLimited(current: followZoom, target: target, dtS: fixDeltaS, speedMps: fixSpeedMps)
+        followZoom = zoom
+        let altitude = MLNAltitudeForZoomLevel(zoom, FollowCamera.pitchDeg, snappedCoordinate.latitude, mapView.bounds.size)
+        applyFollowInset()
         let camera = MLNMapCamera(
-            lookingAtCenter: snappedCoordinate, altitude: 800, pitch: 45, heading: smoothedCourseDeg
+            lookingAtCenter: snappedCoordinate, altitude: altitude, pitch: FollowCamera.pitchDeg, heading: smoothedCourseDeg
         )
-        planStore.mapView.setCamera(camera, withDuration: 0.8, animationTimingFunction: CAMediaTimingFunction(name: .linear))
+        mapView.setCamera(camera, withDuration: min(fixDeltaS, 1.0), animationTimingFunction: CAMediaTimingFunction(name: .linear))
+    }
+
+    /// The Follow Camera's framing inset (wayfinder #92); see `FollowCamera.contentInset`.
+    private func applyFollowInset() {
+        let mapView = planStore.mapView
+        mapView.automaticallyAdjustsContentInset = false
+        mapView.contentInset = FollowCamera.contentInset(
+            viewHeight: mapView.bounds.height, hudHeight: hudHeightPt, bannerHeight: banner != nil ? bannerHeightPt : 0
+        )
+    }
+
+    /// Re-frame on a measured HUD/banner height change, only where the inset is live: driving
+    /// and not in overview (free-look keeps the inset, see `toggleOverview`).
+    private func refreshFollowInset() {
+        guard phase == .driving, cameraMode != .overview else { return }
+        applyFollowInset()
     }
 
     // MARK: Puck
