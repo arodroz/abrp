@@ -87,3 +87,28 @@ data through the pipeline into the Region Pack (a format bump), maneuver
 generation in the planner, and banner + voice UI in the app — charted via the
 research at issue #64, which graduates into build tickets. "Better-route
 offers" and mid-drive editing remain out of scope.
+
+## Amendment (2026-09-30): Follow Camera parameters
+
+A delta to decision 3's camera, from issue #92 (research and reference
+prototype in `docs/research/follow-camera-behaviour.md`). The constant
+800 m / 45° camera is replaced on the phone by:
+
+- **Pitch** fixed at 60°.
+- **Framing**: the vehicle sits at 70 % of the *visible* map strip (banner
+  bottom to HUD top), via a persistent `mapView.contentInset` of
+  top = banner + 0.4 × (H − banner − HUD), bottom = HUD, from the measured
+  heights. This deviates from the ticket's `top = 0.4H + HUD + banner`, which
+  lands the vehicle at 0.7H + banner/2 whatever the HUD height, so the
+  expanded drive card covered it. Re-applied when the measured heights change;
+  reset on End, on arrival and in overview; kept in free-look so gestures and
+  re-centre share one viewport.
+- **Look-ahead zoom**: look-ahead = clamp(speed × 32 s, 200 m, 1500 m), pulled
+  in to (distance to the next manoeuvre + 100 m, floor 200 m) when a step is
+  upcoming, read from `StepTracker` rather than the banner. Zoom is linear,
+  200 m → 17 and 1500 m → 14.5; altitude via `MLNAltitudeForZoomLevel`.
+- **Limiter**: commanded zoom moves at most 0.1 levels per second of wall
+  clock and is frozen below 7 km/h.
+- **Animation**: a linear `setCamera` per fix over min(Δt since the previous
+  fix, 1 s). Heading smoothing is unchanged.
+- **CarPlay** keeps the old constant camera for now.

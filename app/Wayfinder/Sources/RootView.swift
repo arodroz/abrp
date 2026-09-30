@@ -283,24 +283,29 @@ struct RootView: View {
                 ManeuverBannerView(banner: banner)
                     .padding(.horizontal, 16)
                     .padding(.top, 8)
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { driveStore.bannerHeightPt = $0 }
             }
             Spacer()
-            HStack {
-                driveMuteButton
-                driveOverviewButton
-                Spacer()
-                if driveStore.cameraMode != .following {
-                    driveRecenterButton
+            // Measured as one unit for the Follow Camera's framing inset (wayfinder #92).
+            VStack(spacing: 0) {
+                HStack {
+                    driveMuteButton
+                    driveOverviewButton
+                    Spacer()
+                    if driveStore.cameraMode != .following {
+                        driveRecenterButton
+                    }
+                    driveEndButton
                 }
-                driveEndButton
+                .padding(.horizontal, 16)
+                .padding(.bottom, 8)
+                // The drive HUD card (wayfinder #60): nil `hud` only during the brief window
+                // between `go()` and its own initial (unthrottled) computation.
+                if driveStore.hud != nil {
+                    DriveCard(store: store, driveStore: driveStore, telemetryStore: telemetryStore, onSocTap: { socCorrectionPresented = true })
+                }
             }
-            .padding(.horizontal, 16)
-            .padding(.bottom, 8)
-            // The drive HUD card (wayfinder #60): nil `hud` only during the brief window
-            // between `go()` and its own initial (unthrottled) computation.
-            if driveStore.hud != nil {
-                DriveCard(store: store, driveStore: driveStore, telemetryStore: telemetryStore, onSocTap: { socCorrectionPresented = true })
-            }
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { driveStore.hudHeightPt = $0 }
         }
     }
 

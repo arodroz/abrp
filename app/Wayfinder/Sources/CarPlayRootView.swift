@@ -190,6 +190,8 @@ struct CarPlayMapView: UIViewRepresentable {
                 mapView.addAnnotation(annotation)
                 coordinator.puckAnnotation = annotation
             }
+            // CarPlay keeps the old constant altitude/pitch on purpose for now; the phone's Follow
+            // Camera lives in FollowCamera.swift / DriveStore.applyFollowingCamera (wayfinder #92).
             let camera = MLNMapCamera(
                 lookingAtCenter: snappedCoordinate, altitude: 800, pitch: 45, heading: smoothedCourseDeg
             )
