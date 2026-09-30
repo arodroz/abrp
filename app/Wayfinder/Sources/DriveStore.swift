@@ -325,7 +325,11 @@ final class DriveStore: NSObject, @preconcurrency CLLocationManagerDelegate {
         locationManager.distanceFilter = kCLDistanceFilterNone
         locationManager.activityType = .automotiveNavigation
         locationManager.requestWhenInUseAuthorization()
-        locationManager.startUpdatingLocation()
+        // A Trip Log replay (below) is the drive's only fix source: on a phone the real GPS would
+        // otherwise interleave the desk position with the replayed drive in `ingest`.
+        if UserDefaults.standard.string(forKey: "replayTripLog") == nil {
+            locationManager.startUpdatingLocation()
+        }
 
         // e2e drive seam (wayfinder #67), mirror of PlanStore's `-simulatedLocationFix` seam:
         // XCUITest cannot inject CoreLocation fixes, so `-simulatedDriveDistancesM` (a
